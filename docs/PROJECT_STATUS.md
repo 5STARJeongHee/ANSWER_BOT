@@ -101,8 +101,15 @@ pip install -r slack_bot/requirements.txt
 
 ### 4. 봇 실행
 
+`slack_bot/` 디렉토리 안에서 실행해야 한다 (`import config` 경로 때문).
+
 ```bash
-python -m slack_bot.main
+# 로컬 (conda 환경)
+conda run -n slack_bot --cwd D:\My\SLACK_BOT\slack_bot python main.py
+
+# Railway 배포 설정
+# Root Directory: slack_bot
+# Start Command:  python main.py
 ```
 
 ---
