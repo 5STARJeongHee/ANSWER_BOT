@@ -1,21 +1,43 @@
-# Docker Compose - Slack QNA BOT (Supabase 호스팅 DB 사용, 로컬 DB 없음)
+# Docker Compose - Slack QNA BOT + PostgreSQL(pgvector)
 version: "3.9"
 
 services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: slackbot_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-slackbot}
+      POSTGRES_USER: ${POSTGRES_USER:-slackbot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-slackbot} -d ${POSTGRES_DB:-slackbot}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
   app:
     build:
       context: ./slack_bot
       dockerfile: Dockerfile
     container_name: slackbot_app
     restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
     env_file:
-      # 루트의 .env 파일에서 환경변수 로드 (secrets 포함)
       - ./.env
     environment:
+      # .env의 DATABASE_URL을 Docker 내부 네트워크 주소로 덮어씀
+      DATABASE_URL: postgresql://${POSTGRES_USER:-slackbot}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-slackbot}
       MODEL_CONFIG_PATH: /app/properties.txt
+      ENABLE_VECTOR_SEARCH: "true"
     volumes:
       - ./properties.txt:/app/properties.txt:ro
-      # fastembed 모델 캐시 (재시작 시 재다운로드 방지)
       - fastembed_cache:/root/.cache/fastembed
     logging:
       driver: "json-file"
@@ -24,5 +46,7 @@ services:
         max-file: "5"
 
 volumes:
+  pgdata:
+    driver: local
   fastembed_cache:
     driver: local
