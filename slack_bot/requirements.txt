@@ -1,0 +1,32 @@
+# 사내 Slack Q&A 챗봇 의존성 목록
+
+# Slack 연동
+slack-bolt==1.21.3
+slack-sdk==3.34.0
+
+# LLM API (OpenRouter는 OpenAI 호환 엔드포인트 사용)
+openai==1.57.0
+
+# 데이터베이스
+sqlalchemy==2.0.36
+psycopg2-binary==2.9.10
+pgvector==0.3.6
+alembic==1.14.0
+
+# 임베딩 (로컬 실행)
+sentence-transformers==3.3.1
+torch==2.5.1
+transformers==4.47.0
+
+# 스케줄러
+apscheduler==3.10.4
+
+# 환경변수
+python-dotenv==1.0.1
+
+# 유틸리티
+httpx==0.28.1
+tenacity==9.0.0
+
+# 로깅
+structlog==24.4.0

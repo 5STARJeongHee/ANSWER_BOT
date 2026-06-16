@@ -1,0 +1,133 @@
+# Slack 메시지를 질문/요청/기타로 분류하는 경량 LLM 기반 분류기
+import logging
+from dataclasses import dataclass
+from enum import Enum
+from typing import Optional
+
+from services.llm_service import call_classifier, parse_json_response
+
+logger = logging.getLogger(__name__)
+
+# 분류 캐시 (동일 메시지 중복 호출 방지)
+_classify_cache: dict[str, "ClassifyResult"] = {}
+_CACHE_MAX_SIZE = 256
+
+
+class MessageCategory(str, Enum):
+    QUESTION = "QUESTION"    # 정보/방법/상태를 묻는 질문
+    REQUEST = "REQUEST"      # 특정 작업/처리를 부탁하는 요청
+    NONE = "NONE"            # 잡담, 공지, 감사 인사 등
+
+
+@dataclass
+class ClassifyResult:
+    category: MessageCategory
+    confidence: float
+    reason: str
+    is_actionable: bool  # QUESTION 또는 REQUEST이면 True
+
+    @classmethod
+    def none_result(cls) -> "ClassifyResult":
+        return cls(
+            category=MessageCategory.NONE,
+            confidence=1.0,
+            reason="분류 불필요",
+            is_actionable=False,
+        )
+
+
+_SYSTEM_PROMPT = (
+    "너는 사내 Slack 메시지 분류기다. "
+    "입력 메시지가 질문(QUESTION), 업무 요청(REQUEST), 해당 없음(NONE) 중 무엇인지 판단한다.\n\n"
+    "분류 기준:\n"
+    "- QUESTION: 정보, 방법, 상태, 사람 등을 묻는 문장\n"
+    "- REQUEST: 특정 작업, 처리, 검토를 부탁하는 문장\n"
+    "- NONE: 잡담, 공지, 감사 인사, 단순 반응\n\n"
+    'JSON만 출력: {"category": "QUESTION|REQUEST|NONE", "confidence": 0.0~1.0, "reason": "이유"}'
+)
+
+
+def _is_bot_message_by_heuristic(message: str) -> bool:
+    """봇 자신의 응답 패턴인지 휴리스틱으로 판단한다."""
+    bot_prefixes = [
+        "안녕하세요! 사내 Q&A 봇입니다",
+        "답변을 생성 중입니다",
+        "죄송합니다, 현재 답변을 생성할 수 없습니다",
+        "[AI 생성 답변]",
+        "담당자에게 문의해 주세요",
+    ]
+    return any(message.startswith(p) for p in bot_prefixes)
+
+
+def classify_message(
+    message: str,
+    is_mention: bool = False,
+    bot_user_id: Optional[str] = None,
+    sender_user_id: Optional[str] = None,
+) -> ClassifyResult:
+    """
+    메시지를 분류한다.
+    - 봇 메시지는 NONE으로 즉시 반환한다.
+    - 앱 멘션(@챗봇)은 항상 QUESTION으로 처리한다.
+    - 나머지는 LLM 분류기를 호출한다.
+    """
+    if not message or not message.strip():
+        return ClassifyResult.none_result()
+
+    # 봇 자신의 메시지 필터링
+    if bot_user_id and sender_user_id and bot_user_id == sender_user_id:
+        return ClassifyResult.none_result()
+    if _is_bot_message_by_heuristic(message):
+        return ClassifyResult.none_result()
+
+    # 앱 멘션은 항상 처리
+    if is_mention:
+        return ClassifyResult(
+            category=MessageCategory.QUESTION,
+            confidence=1.0,
+            reason="앱 멘션 이벤트",
+            is_actionable=True,
+        )
+
+    # 캐시 조회
+    cache_key = message[:200]  # 200자까지만 키로 사용
+    if cache_key in _classify_cache:
+        logger.debug(f"분류 캐시 히트: {cache_key[:50]!r}")
+        return _classify_cache[cache_key]
+
+    # LLM 분류 호출
+    llm_messages = [
+        {"role": "system", "content": _SYSTEM_PROMPT},
+        {"role": "user", "content": f"메시지: {message}"},
+    ]
+
+    raw = call_classifier(llm_messages)
+    parsed = parse_json_response(
+        raw or "",
+        default={"category": "NONE", "confidence": 0.0, "reason": "분류 실패"},
+    )
+
+    try:
+        category = MessageCategory(parsed.get("category", "NONE").upper())
+    except ValueError:
+        category = MessageCategory.NONE
+
+    result = ClassifyResult(
+        category=category,
+        confidence=float(parsed.get("confidence", 0.0)),
+        reason=str(parsed.get("reason", "")),
+        is_actionable=category in (MessageCategory.QUESTION, MessageCategory.REQUEST),
+    )
+
+    # 캐시 저장 (크기 제한)
+    if len(_classify_cache) >= _CACHE_MAX_SIZE:
+        # 가장 오래된 항목 제거 (FIFO)
+        oldest_key = next(iter(_classify_cache))
+        del _classify_cache[oldest_key]
+    _classify_cache[cache_key] = result
+
+    logger.info(
+        f"분류 결과: {category.value} (신뢰도={result.confidence:.2f}) | "
+        f"메시지={message[:50]!r}"
+    )
+    return result

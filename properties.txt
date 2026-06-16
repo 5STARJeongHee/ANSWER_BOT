@@ -1,0 +1,6 @@
+image: nvidia/nemotron-nano-12b-v2-vl:free
+text: nex-agi/nex-n2-pro:free
+classifier_model: openai/gpt-oss-20b:free
+qa_model: nex-agi/nex-n2-pro:free
+summary_model: nex-agi/nex-n2-pro:free
+rag_query_model: openai/gpt-oss-20b:free

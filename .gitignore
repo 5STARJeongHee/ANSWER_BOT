@@ -216,3 +216,12 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Claude Code 에이전트 설정 (로컬 전용)
+.claude/
+
+# Docker 볼륨 데이터
+postgres_data/
+
+# 프로젝트 로그
+logs/
