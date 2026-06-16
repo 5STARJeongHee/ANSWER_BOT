@@ -15,7 +15,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # fastembed 임베딩 모델 사전 다운로드 (빌드 시 캐싱 — 실행 시 지연 없음)
 RUN python -c "\
 from fastembed import TextEmbedding; \
-list(TextEmbedding(model_name='paraphrase-multilingual-mpnet-base-v2').embed(['warmup']))"
+list(TextEmbedding(model_name='sentence-transformers/paraphrase-multilingual-mpnet-base-v2').embed(['warmup']))"
 
 # 앱 소스 복사
 COPY . .
