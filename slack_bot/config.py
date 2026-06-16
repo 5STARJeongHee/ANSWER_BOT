@@ -81,7 +81,7 @@ DATABASE_URL: str = os.getenv("DATABASE_URL", "")
 
 # --- 벡터 검색 설정 ---
 ENABLE_VECTOR_SEARCH: bool = os.getenv("ENABLE_VECTOR_SEARCH", "true").lower() == "true"
-EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "paraphrase-multilingual-mpnet-base-v2")
+EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "sentence-transformers/paraphrase-multilingual-mpnet-base-v2")
 EMBEDDING_DIM: int = int(os.getenv("EMBEDDING_DIM", "768"))
 
 # RAG 검색 상위 K개

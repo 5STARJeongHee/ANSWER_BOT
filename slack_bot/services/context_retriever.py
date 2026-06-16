@@ -97,6 +97,7 @@ def retrieve_context(
         return results
     except Exception as exc:
         logger.error(f"RAG 검색 오류: {exc}", exc_info=True)
+        session.rollback()
         return []
 
 

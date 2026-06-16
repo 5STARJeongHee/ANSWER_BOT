@@ -185,6 +185,9 @@ def init_db(engine=None) -> None:
     if engine is None:
         engine = get_engine()
 
+    # 테이블 먼저 생성한 뒤 ALTER TABLE을 실행해야 한다.
+    Base.metadata.create_all(engine)
+
     if config.ENABLE_VECTOR_SEARCH:
         with engine.connect() as conn:
             try:
@@ -204,5 +207,3 @@ def init_db(engine=None) -> None:
                 conn.commit()
             except Exception:
                 conn.rollback()
-
-    Base.metadata.create_all(engine)

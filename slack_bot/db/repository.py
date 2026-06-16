@@ -143,17 +143,22 @@ def save_embedding(
     session.flush()
 
     # pgvector 활성화 시 vector 컬럼에도 저장
+    # SAVEPOINT를 사용해 실패 시 기존 INSERT가 롤백되지 않도록 보호한다.
+    # CAST(:vec AS vector) 사용 — :vec::vector 형태는 SQLAlchemy 파라미터 파싱과 충돌
     if config.ENABLE_VECTOR_SEARCH and embedding:
         try:
             vec_str = "[" + ",".join(str(v) for v in embedding) + "]"
+            session.execute(text("SAVEPOINT pgvec_update"))
             session.execute(
                 text(
-                    "UPDATE context_embedding SET embedding = :vec::vector "
+                    "UPDATE context_embedding SET embedding = CAST(:vec AS vector) "
                     "WHERE id = :id"
                 ),
                 {"vec": vec_str, "id": emb.id},
             )
+            session.execute(text("RELEASE SAVEPOINT pgvec_update"))
         except Exception as exc:
+            session.execute(text("ROLLBACK TO SAVEPOINT pgvec_update"))
             logger.warning(f"pgvector 저장 실패 (fallback JSON 유지): {exc}")
 
     return emb
@@ -193,13 +198,14 @@ def _vector_search(
         )
         params["channel_id"] = channel_id
 
+    # CAST(:vec AS vector) 사용 — :vec::vector 형태는 SQLAlchemy 파라미터 파싱과 충돌
     sql = text(
         f"SELECT ce.chunk_text, "
-        f"1 - (ce.embedding <=> :vec::vector) AS similarity, "
+        f"1 - (ce.embedding <=> CAST(:vec AS vector)) AS similarity, "
         f"ce.source_message_id "
         f"FROM context_embedding ce "
         f"{channel_filter} "
-        f"ORDER BY ce.embedding <=> :vec::vector "
+        f"ORDER BY ce.embedding <=> CAST(:vec AS vector) "
         f"LIMIT :top_k"
     )
     try:
@@ -210,6 +216,7 @@ def _vector_search(
         ]
     except Exception as exc:
         logger.warning(f"pgvector 검색 실패, fallback: {exc}")
+        session.rollback()
         return _text_fallback_search(session, channel_id, top_k)
 
 
