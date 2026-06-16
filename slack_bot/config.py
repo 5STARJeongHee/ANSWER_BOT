@@ -5,8 +5,11 @@ import logging
 from pathlib import Path
 from dotenv import load_dotenv
 
-# .env 파일 로드
-load_dotenv()
+# .env 파일 로드 (UTF-8 우선, CP949 폴백 — Windows 한국어 환경 대응)
+try:
+    load_dotenv(encoding="utf-8")
+except UnicodeDecodeError:
+    load_dotenv(encoding="cp949")
 
 logger = logging.getLogger(__name__)
 
