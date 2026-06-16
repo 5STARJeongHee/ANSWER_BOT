@@ -1,4 +1,5 @@
 # LLM 프롬프트 토큰 수를 추정하는 유틸리티 모듈
+from __future__ import annotations
 import re
 
 # 한글 유니코드 범위

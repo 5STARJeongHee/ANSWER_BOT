@@ -1,0 +1,35 @@
+# 시크릿 및 민감 파일
+.env
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 로그
+*.log
+logs/
+
+# HuggingFace 캐시
+.cache/
+
+# 테스트
+.coverage
+htmlcov/
+.pytest_cache/

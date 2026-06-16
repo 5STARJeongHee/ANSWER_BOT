@@ -1,4 +1,5 @@
 # 채널 대화 요약 배치 서비스 - 주기적으로 대화를 압축하여 저장
+from __future__ import annotations
 import logging
 from datetime import date, datetime, timedelta
 from typing import Optional

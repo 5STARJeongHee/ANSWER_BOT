@@ -1,0 +1,57 @@
+# Docker Compose - Slack 챗봇 전체 스택 (Python 앱 + PostgreSQL + pgvector)
+version: "3.9"
+
+services:
+  # PostgreSQL + pgvector 확장
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: slackbot_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: slackbot_db
+      POSTGRES_USER: slackbot
+      POSTGRES_PASSWORD: slackbot_password
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./slack_bot/db/migrations/001_initial_schema.sql:/docker-entrypoint-initdb.d/001_initial_schema.sql:ro
+    ports:
+      # 개발 시에만 포트 노출 - 운영에서는 주석 처리 권장
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U slackbot -d slackbot_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # Slack 챗봇 Python 앱
+  app:
+    build:
+      context: ./slack_bot
+      dockerfile: Dockerfile
+    container_name: slackbot_app
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - ./slack_bot/.env
+    environment:
+      # Docker 내부 네트워크 DB 연결 (env_file의 DATABASE_URL 덮어씀)
+      DATABASE_URL: postgresql://slackbot:slackbot_password@db:5432/slackbot_db
+      MODEL_CONFIG_PATH: /app/properties.txt
+    volumes:
+      - ../properties.txt:/app/properties.txt:ro
+      # 임베딩 모델 캐시 (컨테이너 재시작 시 재다운로드 방지)
+      - hf_cache:/root/.cache/huggingface
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+volumes:
+  pgdata:
+    driver: local
+  hf_cache:
+    driver: local

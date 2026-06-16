@@ -1,4 +1,5 @@
 # OpenRouter API 통합 서비스 - 재시도/fallback 로직 포함
+from __future__ import annotations
 import json
 import logging
 import random

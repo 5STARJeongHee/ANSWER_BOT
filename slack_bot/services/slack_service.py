@@ -1,4 +1,5 @@
 # Slack 메시지 전송 및 대화 이력 조회 서비스
+from __future__ import annotations
 import logging
 import time
 from typing import Optional

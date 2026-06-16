@@ -1,4 +1,5 @@
 # 데이터베이스 CRUD 함수 모음 - 모든 DB 접근은 이 모듈을 통한다
+from __future__ import annotations
 import logging
 from datetime import date, datetime
 from typing import Optional

@@ -1,4 +1,5 @@
 # pgvector 유사도 검색 기반 RAG 컨텍스트 검색 서비스
+from __future__ import annotations
 import logging
 from typing import Optional
 
@@ -91,9 +92,8 @@ def retrieve_context(
             channel_id=channel_id,
             top_k=top_k,
         )
-        logger.info(
-            f"RAG 검색 완료: {len(results)}건 (쿼리={search_query!r[:50]})"
-        )
+        query_preview = repr(search_query[:50])
+        logger.info(f"RAG 검색 완료: {len(results)}건 (쿼리={query_preview})")
         return results
     except Exception as exc:
         logger.error(f"RAG 검색 오류: {exc}", exc_info=True)

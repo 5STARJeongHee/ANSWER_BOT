@@ -1,4 +1,5 @@
 # Slack 메시지를 질문/요청/기타로 분류하는 경량 LLM 기반 분류기
+from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from enum import Enum

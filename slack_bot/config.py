@@ -1,4 +1,5 @@
 # 환경변수 로드 및 전체 설정값 관리 모듈
+from __future__ import annotations
 import os
 import logging
 from pathlib import Path
@@ -33,9 +34,11 @@ _model_config_path = os.getenv("MODEL_CONFIG_PATH", "../properties.txt")
 _props = _load_properties(_model_config_path)
 
 # --- Slack 설정 ---
-SLACK_BOT_TOKEN: str = os.environ["SLACK_BOT_TOKEN"]
-SLACK_APP_TOKEN: str = os.environ["SLACK_APP_TOKEN"]
-SLACK_SIGNING_SECRET: str = os.environ["SLACK_SIGNING_SECRET"]
+# os.getenv를 사용하여 임포트 시 즉시 KeyError가 발생하지 않도록 한다.
+# 실제 존재 여부는 main.py에서 validate_config()를 호출하여 검증한다.
+SLACK_BOT_TOKEN: str = os.getenv("SLACK_BOT_TOKEN", "")
+SLACK_APP_TOKEN: str = os.getenv("SLACK_APP_TOKEN", "")
+SLACK_SIGNING_SECRET: str = os.getenv("SLACK_SIGNING_SECRET", "")
 
 # 수집 대상 채널 ID 목록
 _raw_channels = os.getenv("TARGET_CHANNEL_IDS", "")
@@ -46,7 +49,7 @@ _raw_fallback = os.getenv("FALLBACK_MENTION_USER_IDS", "")
 FALLBACK_MENTION_USER_IDS: list[str] = [u.strip() for u in _raw_fallback.split(",") if u.strip()]
 
 # --- OpenRouter API 설정 ---
-OPENROUTER_API_KEY: str = os.environ["OPENROUTER_API_KEY"]
+OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_BASE_URL: str = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
 
 # --- 모델 설정 (properties.txt 우선, 환경변수 fallback) ---
@@ -71,7 +74,7 @@ SUMMARY_FALLBACK_CHAIN: list[str] = [
 ]
 
 # --- 데이터베이스 설정 ---
-DATABASE_URL: str = os.environ["DATABASE_URL"]
+DATABASE_URL: str = os.getenv("DATABASE_URL", "")
 
 # --- 벡터 검색 설정 ---
 ENABLE_VECTOR_SEARCH: bool = os.getenv("ENABLE_VECTOR_SEARCH", "true").lower() == "true"
