@@ -26,7 +26,7 @@ apscheduler==3.10.4
 python-dotenv==1.0.1
 
 # 유틸리티
-httpx==0.28.1
+httpx>=0.26,<0.28
 tenacity==9.0.0
 
 # 로깅
