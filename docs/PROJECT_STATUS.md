@@ -14,7 +14,7 @@
 | DB | Supabase 연동 (pgvector + NullPool + SSL) | ✅ 완료 |
 | UI/UX | Slack Block Kit 메시지 컴포넌트 (`slack_bot/ui/`) | ✅ 완료 |
 | 테스트 | 단위 테스트 109개 (100% PASS) | ✅ 완료 |
-| 문서 | Supabase 설정 가이드, QA 리포트 | ✅ 완료 |
+| 문서 | Supabase 설정 가이드, Slack 앱 설정 가이드, QA 리포트 | ✅ 완료 |
 
 ---
 
@@ -76,7 +76,7 @@ event_handler.py   ← 이벤트 수신, 3초 ack 후 스레드 처리
 # Supabase 대시보드 → Project Settings → Database → Transaction Pooler 탭에서 복사
 DATABASE_URL=postgresql://postgres.PROJECT_REF:PASSWORD@aws-0-REGION.pooler.supabase.com:6543/postgres?sslmode=require
 
-# Slack App 토큰 (api.slack.com → 앱 설정)
+# Slack App 토큰 — 발급 절차는 docs/SLACK_SETUP.md 참조
 SLACK_BOT_TOKEN=xoxb-...
 SLACK_APP_TOKEN=xapp-...
 SLACK_SIGNING_SECRET=...
