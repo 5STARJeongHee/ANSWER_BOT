@@ -1,7 +1,16 @@
--- Slack 챗봇 초기 스키마 마이그레이션 SQL (Alembic 대신 단독 실행 가능)
--- 실행 순서: 이 파일을 psql로 직접 실행하거나 Alembic env.py에서 참조한다
+-- Slack 챗봇 초기 스키마 마이그레이션 SQL
+--
+-- [Supabase 실행 방법]
+-- 1. Supabase 대시보드 → SQL Editor → New query
+-- 2. 이 파일 내용을 전체 붙여넣기 후 Run (F5)
+-- 3. pgvector는 Supabase에 기본 내장 — 아래 CREATE EXTENSION 구문은 멱등적으로 안전
+--
+-- [로컬 PostgreSQL 실행 방법]
+-- psql -U postgres -d slackbot_db -f 001_initial_schema.sql
 
--- pgvector 확장 활성화 (pgvector Docker 이미지 필요)
+-- pgvector 확장 활성화
+-- Supabase: 이미 내장 (IF NOT EXISTS로 안전하게 실행됨)
+-- 로컬: pgvector 별도 설치 필요 (docker: ankane/pgvector)
 CREATE EXTENSION IF NOT EXISTS vector;
 
 -- ---------------------------------------------------------------------------

@@ -16,7 +16,10 @@ from services.slack_service import (
     post_thinking_indicator,
     update_message,
     post_message,
+    post_answer,
+    post_error,
     send_fallback_message,
+    send_greeting_message,
     get_user_display_name,
 )
 from utils.pii_filter import apply_pii_filter, has_pii
@@ -226,12 +229,12 @@ def _process_question(
         can_answer = _evaluate_answer(question, answer)
         if not can_answer:
             logger.info(f"Fallback 판단: 답변 불확실 (question={question[:50]!r})")
-            _delete_thinking_msg(client, channel_id, thinking_ts)
             send_fallback_message(
                 client=client,
                 channel=channel_id,
                 thread_ts=thread_ts,
                 question=question,
+                thinking_ts=thinking_ts,
             )
             # Fallback 이력 저장
             _save_message_and_embed(
@@ -247,13 +250,23 @@ def _process_question(
             )
             return
 
-        # 7. 답변 전송
-        if thinking_ts:
-            update_message(client=client, channel=channel_id, ts=thinking_ts, text=answer)
-        else:
-            post_message(client=client, channel=channel_id, text=answer, thread_ts=thread_ts)
+        # 7. 답변 전송 (Block Kit)
+        context_count = len(contexts)
+        sent_ts = post_answer(
+            client=client,
+            channel=channel_id,
+            thread_ts=thread_ts,
+            answer=answer,
+            context_count=context_count,
+            thinking_ts=thinking_ts,
+        )
 
-        # 8. 봇 응답 저장
+        # 8. 피드백 이모지 시드 추가 (reactions:write 스코프 필요)
+        if sent_ts:
+            from ui.reaction_handler import add_feedback_reactions
+            add_feedback_reactions(client=client, channel=channel_id, message_ts=sent_ts)
+
+        # 9. 봇 응답 저장
         _save_message_and_embed(
             session_factory=session_factory,
             event_id=None,
@@ -295,21 +308,13 @@ def _send_error_or_fallback(
     question: str,
     thinking_ts: Optional[str],
 ) -> None:
-    """오류 발생 시 에러 메시지 또는 fallback을 전송한다."""
-    if thinking_ts:
-        update_message(
-            client=client,
-            channel=channel_id,
-            ts=thinking_ts,
-            text="죄송합니다, 현재 답변을 생성할 수 없습니다. 잠시 후 다시 시도해 주세요. :pray:",
-        )
-    else:
-        send_fallback_message(
-            client=client,
-            channel=channel_id,
-            thread_ts=thread_ts,
-            question=question,
-        )
+    """오류 발생 시 Block Kit 에러 메시지를 전송하거나 thinking 메시지를 업데이트한다."""
+    post_error(
+        client=client,
+        channel=channel_id,
+        thread_ts=thread_ts,
+        thinking_ts=thinking_ts,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -345,7 +350,11 @@ def register_handlers(app: App, session_factory) -> None:
         question = _clean_mention_text(raw_text, bot_user_id or "")
 
         if not question:
-            say(text="안녕하세요! 무엇을 도와드릴까요? :wave:", thread_ts=thread_ts)
+            send_greeting_message(
+                client=client,
+                channel=channel_id,
+                thread_ts=thread_ts,
+            )
             return
 
         # 중복 이벤트 조회 (DB 저장 전 사전 체크)

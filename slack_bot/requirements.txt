@@ -7,11 +7,12 @@ slack-sdk==3.34.0
 # LLM API (OpenRouter는 OpenAI 호환 엔드포인트 사용)
 openai==1.57.0
 
-# 데이터베이스
+# 데이터베이스 (Supabase PostgreSQL + pgvector)
 sqlalchemy==2.0.36
 psycopg2-binary==2.9.10
 pgvector==0.3.6
 alembic==1.14.0
+supabase==2.10.0
 
 # 임베딩 (로컬 실행)
 sentence-transformers==3.3.1

@@ -51,6 +51,11 @@ def main() -> None:
     register_handlers(app=app, session_factory=session_factory)
     logger.info("이벤트 핸들러 등록 완료")
 
+    # 4-1. 리액션 핸들러 등록 (👍/👎 피드백 수집, reactions:read 스코프 필요)
+    from ui.reaction_handler import register_reaction_handlers
+    register_reaction_handlers(app=app, session_factory=session_factory)
+    logger.info("리액션 핸들러 등록 완료")
+
     # 5. APScheduler 시작
     from batch.scheduler import create_scheduler
     scheduler = create_scheduler(session_factory=session_factory)

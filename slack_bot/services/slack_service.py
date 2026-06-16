@@ -8,6 +8,13 @@ from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
 import config
+from ui.message_blocks import (
+    build_thinking_blocks,
+    build_answer_blocks,
+    build_fallback_blocks,
+    build_error_blocks,
+    build_greeting_blocks,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -38,11 +45,14 @@ def post_message(
     channel: str,
     text: str,
     thread_ts: Optional[str] = None,
+    blocks: Optional[list] = None,
 ) -> Optional[dict]:
     """Slack 채널 또는 스레드에 메시지를 전송한다."""
     kwargs: dict = {"channel": channel, "text": text}
     if thread_ts:
         kwargs["thread_ts"] = thread_ts
+    if blocks:
+        kwargs["blocks"] = blocks
 
     try:
         response = _with_retry(client.chat_postMessage, **kwargs)
@@ -58,13 +68,15 @@ def post_thinking_indicator(
     thread_ts: Optional[str] = None,
 ) -> Optional[str]:
     """
-    '답변 생성 중...' 임시 메시지를 전송하고 메시지 ts를 반환한다.
-    나중에 update_message()로 교체한다.
+    '답변 생성 중...' 임시 Block Kit 메시지를 전송하고 메시지 ts를 반환한다.
+    나중에 update_message_blocks()로 교체한다.
     """
+    payload = build_thinking_blocks()
     response = post_message(
         client=client,
         channel=channel,
-        text="답변을 생성 중입니다... :hourglass_flowing_sand:",
+        text=payload["text"],
+        blocks=payload["blocks"],
         thread_ts=thread_ts,
     )
     if response and response.get("ok"):
@@ -78,13 +90,92 @@ def update_message(
     ts: str,
     text: str,
 ) -> bool:
-    """기존 메시지를 새 내용으로 업데이트한다."""
+    """기존 메시지를 새 텍스트로 업데이트한다 (블록 없음, 하위 호환 유지)."""
     try:
         _with_retry(client.chat_update, channel=channel, ts=ts, text=text)
         return True
     except SlackApiError as exc:
         logger.error(f"메시지 업데이트 실패 (channel={channel}, ts={ts}): {exc}")
         return False
+
+
+def update_message_blocks(
+    client: WebClient,
+    channel: str,
+    ts: str,
+    payload: dict,
+) -> bool:
+    """
+    기존 메시지를 Block Kit 페이로드로 업데이트한다.
+    payload는 {"text": ..., "blocks": [...]} 형태여야 한다.
+    """
+    try:
+        _with_retry(
+            client.chat_update,
+            channel=channel,
+            ts=ts,
+            text=payload["text"],
+            blocks=payload["blocks"],
+        )
+        return True
+    except SlackApiError as exc:
+        logger.error(f"블록 메시지 업데이트 실패 (channel={channel}, ts={ts}): {exc}")
+        return False
+
+
+def post_answer(
+    client: WebClient,
+    channel: str,
+    thread_ts: Optional[str],
+    answer: str,
+    context_count: int = 0,
+    thinking_ts: Optional[str] = None,
+) -> Optional[str]:
+    """
+    일반 QA 답변을 Block Kit으로 전송하거나 기존 thinking 메시지를 업데이트한다.
+    전송된 메시지의 ts를 반환한다 (피드백 이모지 추가에 사용).
+    """
+    payload = build_answer_blocks(answer=answer, context_count=context_count)
+
+    if thinking_ts:
+        success = update_message_blocks(
+            client=client, channel=channel, ts=thinking_ts, payload=payload
+        )
+        return thinking_ts if success else None
+
+    response = post_message(
+        client=client,
+        channel=channel,
+        text=payload["text"],
+        blocks=payload["blocks"],
+        thread_ts=thread_ts,
+    )
+    if response and response.get("ok"):
+        return response["ts"]
+    return None
+
+
+def post_error(
+    client: WebClient,
+    channel: str,
+    thread_ts: Optional[str],
+    thinking_ts: Optional[str] = None,
+) -> None:
+    """에러 Block Kit 메시지를 전송하거나 thinking 메시지를 에러로 업데이트한다."""
+    payload = build_error_blocks()
+
+    if thinking_ts:
+        update_message_blocks(
+            client=client, channel=channel, ts=thinking_ts, payload=payload
+        )
+    else:
+        post_message(
+            client=client,
+            channel=channel,
+            text=payload["text"],
+            blocks=payload["blocks"],
+            thread_ts=thread_ts,
+        )
 
 
 def fetch_channel_history(
@@ -165,19 +256,47 @@ def send_fallback_message(
     thread_ts: Optional[str],
     question: str,
     fallback_user_ids: Optional[list[str]] = None,
+    thinking_ts: Optional[str] = None,
 ) -> None:
     """
-    챗봇이 답변하기 어려운 경우 담당자 호출 메시지를 전송한다.
+    챗봇이 답변하기 어려운 경우 담당자 호출 Block Kit 메시지를 전송한다.
+    thinking_ts가 있으면 해당 메시지를 업데이트하고, 없으면 새 메시지를 전송한다.
     fallback 이력은 호출자가 DB에 기록한다.
     """
     if fallback_user_ids is None:
         fallback_user_ids = config.FALLBACK_MENTION_USER_IDS
 
-    mention_str = build_fallback_mention(fallback_user_ids)
-    text = (
-        f"안녕하세요! 해당 질문에 대해 정확한 답변을 드리기 어렵습니다. :bow:\n\n"
-        f"더 정확한 정보를 위해 담당자 {mention_str}에게 문의해 주세요.\n\n"
-        f"> 질문: {question[:200]}"
+    payload = build_fallback_blocks(
+        question=question,
+        fallback_user_ids=fallback_user_ids,
     )
-    post_message(client=client, channel=channel, text=text, thread_ts=thread_ts)
+
+    if thinking_ts:
+        update_message_blocks(
+            client=client, channel=channel, ts=thinking_ts, payload=payload
+        )
+    else:
+        post_message(
+            client=client,
+            channel=channel,
+            text=payload["text"],
+            blocks=payload["blocks"],
+            thread_ts=thread_ts,
+        )
     logger.info(f"Fallback 메시지 전송 완료 (channel={channel})")
+
+
+def send_greeting_message(
+    client: WebClient,
+    channel: str,
+    thread_ts: Optional[str],
+) -> None:
+    """질문 없이 봇을 멘션했을 때 환영 메시지를 전송한다."""
+    payload = build_greeting_blocks()
+    post_message(
+        client=client,
+        channel=channel,
+        text=payload["text"],
+        blocks=payload["blocks"],
+        thread_ts=thread_ts,
+    )
