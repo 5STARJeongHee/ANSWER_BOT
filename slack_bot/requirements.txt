@@ -14,10 +14,8 @@ pgvector==0.3.6
 alembic==1.14.0
 supabase==2.10.0
 
-# 임베딩 (로컬 실행)
-sentence-transformers==3.3.1
-torch==2.5.1
-transformers==4.47.0
+# 임베딩 (ONNX 런타임, torch 불필요)
+fastembed==0.4.2
 
 # 스케줄러
 apscheduler==3.10.4

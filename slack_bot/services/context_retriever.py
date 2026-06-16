@@ -11,17 +11,17 @@ from services.llm_service import call_rag_query
 
 logger = logging.getLogger(__name__)
 
-# sentence-transformers 임베딩 모델 (지연 로딩)
+# fastembed 임베딩 모델 (지연 로딩, ONNX 런타임 사용 — torch 불필요)
 _embedding_model = None
 
 
 def _get_embedding_model():
-    """임베딩 모델을 지연 로딩한다 (최초 호출 시 다운로드)."""
+    """임베딩 모델을 지연 로딩한다 (최초 호출 시 ONNX 모델 다운로드)."""
     global _embedding_model
     if _embedding_model is None:
         logger.info(f"임베딩 모델 로딩 중: {config.EMBEDDING_MODEL}")
-        from sentence_transformers import SentenceTransformer
-        _embedding_model = SentenceTransformer(config.EMBEDDING_MODEL)
+        from fastembed import TextEmbedding
+        _embedding_model = TextEmbedding(model_name=config.EMBEDDING_MODEL)
         logger.info("임베딩 모델 로딩 완료")
     return _embedding_model
 
@@ -32,8 +32,8 @@ def embed_text(text: str) -> Optional[list[float]]:
         return None
     try:
         model = _get_embedding_model()
-        vector = model.encode(text, normalize_embeddings=True)
-        return vector.tolist()
+        vectors = list(model.embed([text]))
+        return vectors[0].tolist()
     except Exception as exc:
         logger.error(f"임베딩 생성 실패: {exc}", exc_info=True)
         return None
