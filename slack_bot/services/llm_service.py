@@ -150,24 +150,19 @@ def call_rag_query(messages: list[dict]) -> Optional[str]:
     )
 
 
-def call_vision(image_b64: str, prompt: str) -> Optional[str]:
-    """압축된 이미지(base64)와 프롬프트를 vision 모델에 전달하고 응답을 반환한다."""
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": prompt},
-                {
-                    "type": "image_url",
-                    "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"},
-                },
-            ],
-        }
-    ]
+def call_vision(images_b64: list[str], prompt: str) -> Optional[str]:
+    """이미지(base64 리스트)와 프롬프트를 vision 모델에 한 번에 전달하고 응답을 반환한다."""
+    content: list[dict] = [{"type": "text", "text": prompt}]
+    for b64 in images_b64:
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
+        })
+    messages = [{"role": "user", "content": content}]
     return _call_with_retry(
         model=config.IMAGE_MODEL,
         messages=messages,
-        max_tokens=600,
+        max_tokens=600 * len(images_b64),
     )
 
 

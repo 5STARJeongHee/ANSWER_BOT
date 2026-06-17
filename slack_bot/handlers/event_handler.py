@@ -82,6 +82,7 @@ def _clean_mention_text(text: str, bot_user_id: str) -> str:
 
 
 _IMAGE_MIME_PREFIXES = ("image/jpeg", "image/png", "image/gif", "image/webp")
+_MAX_IMAGES = 10  # 한 메시지에서 분석할 최대 이미지 수
 
 _IMAGE_DESCRIBE_PROMPT = (
     "이 이미지에서 텍스트를 추출해줘. "
@@ -90,10 +91,13 @@ _IMAGE_DESCRIBE_PROMPT = (
 )
 
 
-def _extract_image_b64(event: dict, bot_token: str) -> Optional[str]:
-    """이벤트에서 첫 번째 이미지 파일을 찾아 다운로드 후 base64로 반환한다."""
+def _extract_images_b64(event: dict, bot_token: str) -> list[str]:
+    """이벤트에서 이미지 파일을 최대 _MAX_IMAGES개 다운로드해 base64 리스트로 반환한다."""
     files = event.get("files") or []
+    results: list[str] = []
     for f in files:
+        if len(results) >= _MAX_IMAGES:
+            break
         mime = f.get("mimetype", "")
         if not any(mime.startswith(p) for p in _IMAGE_MIME_PREFIXES):
             continue
@@ -102,18 +106,30 @@ def _extract_image_b64(event: dict, bot_token: str) -> Optional[str]:
             continue
         b64 = download_and_compress(url, bot_token)
         if b64:
-            return b64
-    return None
+            results.append(b64)
+    return results
 
 
-def _describe_image(image_b64: str) -> str:
-    """이미지를 vision 모델로 분석하고 설명 텍스트를 반환한다. 실패 시 빈 문자열."""
+def _build_image_context(event: dict, bot_token: str) -> str:
+    """이벤트의 이미지를 모두 묶어 vision 모델에 한 번에 전달하고 결과를 반환한다."""
     from services.llm_service import call_vision
-    result = call_vision(image_b64, _IMAGE_DESCRIBE_PROMPT)
+    images_b64 = _extract_images_b64(event, bot_token)
+    if not images_b64:
+        return ""
+    count = len(images_b64)
+    prompt = _IMAGE_DESCRIBE_PROMPT
+    if count > 1:
+        prompt = (
+            f"첨부된 이미지 {count}장을 순서대로 분석해줘. "
+            "각 이미지마다 '[이미지 N]' 레이블을 붙여 구분해줘. "
+            "서문이나 설명 없이 오류 메시지, 예외 클래스명, 스택 트레이스 라인만 한 줄씩 나열해줘. "
+            "텍스트가 없으면 해당 이미지에서 보이는 내용을 간결하게 한 줄로 설명해줘."
+        )
+    result = call_vision(images_b64, prompt)
     if result:
-        logger.info("이미지 분석 완료")
+        logger.info(f"이미지 분석 완료: {count}장")
         return result.strip()
-    logger.warning("이미지 분석 실패")
+    logger.warning(f"이미지 분석 실패: {count}장")
     return ""
 
 
@@ -426,15 +442,13 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
         def worker():
             user_name = get_user_display_name(client, user_id) if user_id else "익명"
 
-            # 첨부 이미지가 있으면 압축 후 vision 모델로 분석
+            # 첨부 이미지가 있으면 압축 후 vision 모델로 분석 (최대 _MAX_IMAGES개)
             effective_question = question
-            image_b64 = _extract_image_b64(event, config.SLACK_BOT_TOKEN)
-            if image_b64:
-                image_desc = _describe_image(image_b64)
-                if image_desc:
-                    effective_question = (
-                        f"[첨부 이미지 분석]\n{image_desc}\n\n{question}".strip()
-                    )
+            image_context = _build_image_context(event, config.SLACK_BOT_TOKEN)
+            if image_context:
+                effective_question = (
+                    f"[첨부 이미지 분석]\n{image_context}\n\n{question}".strip()
+                )
 
             _save_message_and_embed(
                 session_factory=session_factory,
@@ -545,15 +559,13 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
             if not classify_result.is_actionable:
                 return
 
-            # 첨부 이미지가 있으면 압축 후 vision 모델로 분석
+            # 첨부 이미지가 있으면 압축 후 vision 모델로 분석 (최대 _MAX_IMAGES개)
             effective_question = raw_text
-            image_b64 = _extract_image_b64(event, config.SLACK_BOT_TOKEN)
-            if image_b64:
-                image_desc = _describe_image(image_b64)
-                if image_desc:
-                    effective_question = (
-                        f"[첨부 이미지 분석]\n{image_desc}\n\n{raw_text}".strip()
-                    )
+            image_context = _build_image_context(event, config.SLACK_BOT_TOKEN)
+            if image_context:
+                effective_question = (
+                    f"[첨부 이미지 분석]\n{image_context}\n\n{raw_text}".strip()
+                )
 
             user_name = get_user_display_name(client, user_id) if user_id else "익명"
             thinking_ts = post_thinking_indicator(
