@@ -413,7 +413,8 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
         channel_id = event.get("channel")
         thread_ts = event.get("thread_ts") or event.get("ts")
         message_ts = event.get("ts", "")
-        event_id = event.get("event_ts") or message_ts
+        # app_mention과 message 이벤트는 동일한 event_ts를 가지므로 prefix로 구분한다.
+        event_id = "mention_" + (event.get("event_ts") or message_ts)
         user_id = event.get("user")
         raw_text = event.get("text", "")
 
@@ -501,7 +502,8 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
 
         thread_ts = event.get("thread_ts")
         message_ts = event.get("ts", "")
-        event_id = event.get("event_ts") or message_ts
+        # app_mention과 message 이벤트는 동일한 event_ts를 가지므로 prefix로 구분한다.
+        event_id = "msg_" + (event.get("event_ts") or message_ts)
         user_id = event.get("user")
         raw_text = event.get("text", "")
 
