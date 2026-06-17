@@ -59,6 +59,16 @@ services:
       - "11434:11434"
     volumes:
       - ollama_models:/root/.ollama
+    # 👇 [추가] 서비스 보호를 위한 안전장치 환경 변수
+    environment:
+      - OMP_NUM_THREADS=8
+      - LLAMA_ARG_THREADS=8
+    # 👇 [추가] 도커 수준에서의 CPU 및 RAM 하드 한도 지정 (Compose v3 버전 이상 기준)
+    deploy:
+      resources:
+        limits:
+          cpus: '8.0'        # 전체 32스레드 중 딱 8개만큼의 연산력만 허용 (25% 제한)
+          memory: 32gb       # LLM 스택이 순간적으로 폭주해도 최대 32GB까지만 메모리 허용
     # CPU 전용 서버이므로 GPU 설정 없음. AVX512는 llama.cpp가 자동 감지.
 
 volumes:
