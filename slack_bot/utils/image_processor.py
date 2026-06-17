@@ -31,6 +31,15 @@ def download_and_compress(url: str, bot_token: str) -> str | None:
         logger.warning(f"이미지 다운로드 실패 ({url[:60]}...): {exc}")
         return None
 
+    content_type = resp.headers.get("content-type", "")
+    if not content_type.startswith("image/"):
+        logger.warning(
+            f"이미지 다운로드 실패: content-type={content_type!r}, "
+            f"body_preview={resp.content[:200]!r}. "
+            f"Slack 앱에 files:read 스코프가 누락됐을 가능성이 높습니다."
+        )
+        return None
+
     try:
         img = Image.open(io.BytesIO(resp.content)).convert("RGB")
         original_size = img.size

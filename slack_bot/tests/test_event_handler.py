@@ -29,6 +29,11 @@ sys.modules.setdefault("ui", _ui_stub)
 sys.modules.setdefault("ui.message_blocks", _ui_stub)
 sys.modules.setdefault("ui.reaction_handler", _ui_stub)
 
+# PIL / image_processor stub (로컬 환경 Pillow DLL 호환성 문제 우회)
+_pil_stub = MagicMock()
+sys.modules.setdefault("PIL", _pil_stub)
+sys.modules.setdefault("PIL.Image", _pil_stub)
+
 import pytest
 
 # Bolt App 임포트를 피하기 위해 handlers.event_handler의 헬퍼들을 직접 임포트한다.
@@ -69,30 +74,24 @@ class TestCleanMentionText:
 
 
 class TestEvaluateAnswer:
-    def test_returns_true_when_can_answer(self):
-        with patch("services.llm_service.call_with_fallback", return_value='{"can_answer_directly": true}'), \
-             patch("handlers.event_handler.parse_json_response", return_value={"can_answer_directly": True}):
-            result = _evaluate_answer("질문", "답변 초안")
+    def test_returns_true_when_no_fallback_keyword(self):
+        result = _evaluate_answer("질문", "네, 연차는 HR 시스템에서 신청하면 됩니다. [AI 생성 답변]")
         assert result is True
 
-    def test_returns_false_when_cannot_answer(self):
-        with patch("services.llm_service.call_with_fallback", return_value='{"can_answer_directly": false}'), \
-             patch("handlers.event_handler.parse_json_response", return_value={"can_answer_directly": False}):
-            result = _evaluate_answer("정책 질문", "추측성 답변")
+    def test_returns_false_when_contains_confirmation_needed(self):
+        result = _evaluate_answer("정책 질문", "해당 내용은 확인이 필요합니다. [AI 생성 답변]")
         assert result is False
 
-    def test_returns_true_on_llm_failure(self):
-        """LLM 실패 시 기본값 True를 반환하여 답변 전송을 허용한다."""
-        with patch("services.llm_service.call_with_fallback", return_value=None), \
-             patch("handlers.event_handler.parse_json_response", return_value={"can_answer_directly": True}):
-            result = _evaluate_answer("질문", "답변")
-        assert result is True
+    def test_returns_false_when_contains_manager_contact(self):
+        result = _evaluate_answer("질문", "담당자에게 문의 부탁드립니다.")
+        assert result is False
 
-    def test_returns_true_on_json_parse_failure(self):
-        """JSON 파싱 실패 시 기본값 True를 반환한다."""
-        with patch("services.llm_service.call_with_fallback", return_value="invalid json"), \
-             patch("handlers.event_handler.parse_json_response", return_value={"can_answer_directly": True}):
-            result = _evaluate_answer("질문", "답변")
+    def test_returns_false_when_contains_unknown_keyword(self):
+        result = _evaluate_answer("질문", "정확한 내용은 알 수 없습니다.")
+        assert result is False
+
+    def test_returns_true_on_empty_answer(self):
+        result = _evaluate_answer("질문", "")
         assert result is True
 
 

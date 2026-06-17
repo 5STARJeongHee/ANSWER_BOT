@@ -30,6 +30,7 @@
                 "channels:history",
                 "channels:read",
                 "chat:write",
+                "files:read",
                 "reactions:write",
                 "reactions:read",
                 "users:read"
@@ -63,6 +64,7 @@
 | `channels:history` | 채널 메시지 기록 읽기 (RAG 컨텍스트 수집) |
 | `channels:read` | 채널 정보 조회 |
 | `chat:write` | 답변 메시지 전송 |
+| `files:read` | 첨부 이미지 다운로드 (`url_private_download` 접근) |
 | `reactions:write` | 처리 중 이모지 반응 추가/삭제 |
 | `reactions:read` | 이모지 반응 상태 확인 |
 | `users:read` | 사용자 정보 조회 (PII 마스킹용) |

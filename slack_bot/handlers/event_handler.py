@@ -11,7 +11,7 @@ from db.models import get_session_factory
 from db.repository import upsert_message
 from services.classifier import classify_message, MessageCategory
 from services.context_retriever import retrieve_context, format_context_for_prompt, embed_text
-from services.llm_service import call_qa, parse_json_response
+from services.llm_service import call_qa
 from services.slack_service import (
     post_thinking_indicator,
     update_message,
@@ -36,14 +36,6 @@ _QA_SYSTEM_PROMPT = (
     "모르는 내용은 추측하지 말고 '확인이 필요합니다'라고 답하라.\n"
     "답변은 2~5문장 내로 핵심만 전달하라.\n"
     "AI 생성 답변임을 사용자가 인지할 수 있도록 답변 끝에 '[AI 생성 답변]'을 덧붙인다."
-)
-
-_FALLBACK_EVAL_PROMPT = (
-    "아래 답변 초안이 사용자의 질문에 대해 충분히 신뢰할 수 있는 답변인지 평가하라.\n"
-    "평가 기준:\n"
-    "- 사실 확인이 필요한 정책/수치/일정 정보를 포함하는가\n"
-    "- 컨텍스트에 근거 없이 추측한 부분이 있는가\n"
-    '출력(JSON): {"can_answer_directly": true/false, "fallback_message": "담당자 호출용 안내 문구"}'
 )
 
 
@@ -91,29 +83,22 @@ def _describe_image(image_b64: str) -> str:
     return ""
 
 
+_FALLBACK_TRIGGER_KEYWORDS = (
+    "확인이 필요합니다",
+    "확인 필요합니다",
+    "담당자에게 문의",
+    "담당자 문의",
+    "알 수 없습니다",
+)
+
+
 def _evaluate_answer(question: str, draft_answer: str) -> bool:
     """
-    LLM으로 답변 신뢰도를 평가하고 직접 답변 가능 여부를 반환한다.
-    평가 실패 시 True를 반환하여 답변 전송을 기본 동작으로 유지한다.
+    답변 텍스트에 불확실성 키워드가 있으면 False를 반환한다.
+    QA 프롬프트가 "모르면 확인이 필요합니다라고 답하라"고 지시하므로
+    추가 LLM 호출 없이 규칙 기반으로 판단한다.
     """
-    from services.llm_service import call_with_fallback
-    messages = [
-        {"role": "system", "content": _FALLBACK_EVAL_PROMPT},
-        {
-            "role": "user",
-            "content": f"질문: {question}\n답변 초안: {draft_answer}",
-        },
-    ]
-    raw = call_with_fallback(
-        model_chain=config.CLASSIFIER_FALLBACK_CHAIN,
-        messages=messages,
-        max_tokens=100,
-        response_format={"type": "json_object"},
-    )
-    parsed = parse_json_response(
-        raw or "", default={"can_answer_directly": True}
-    )
-    return bool(parsed.get("can_answer_directly", True))
+    return not any(kw in draft_answer for kw in _FALLBACK_TRIGGER_KEYWORDS)
 
 
 def _save_message_and_embed(
