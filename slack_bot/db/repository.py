@@ -309,3 +309,25 @@ def get_latest_summary(
         .order_by(ContextSummary.period_end.desc())
         .first()
     )
+
+
+def has_negative_feedback(session: Session, message_id: int) -> bool:
+    """
+    RAG 결과의 message_id에 해당하는 메시지에 순부정 피드백이 있는지 확인한다.
+    conversation_message.message_ts -> message_feedback.message_ts 경유 조회.
+    """
+    msg = session.query(ConversationMessage).filter(
+        ConversationMessage.id == message_id
+    ).first()
+    if not msg:
+        return False
+
+    feedbacks = session.query(MessageFeedback).filter(
+        MessageFeedback.message_ts == msg.message_ts
+    ).all()
+    if not feedbacks:
+        return False
+
+    neg = sum(1 for f in feedbacks if f.sentiment == "negative")
+    pos = sum(1 for f in feedbacks if f.sentiment == "positive")
+    return neg > pos

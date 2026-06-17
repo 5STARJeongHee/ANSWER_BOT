@@ -1,4 +1,4 @@
-# web_search 서비스 단위 테스트 — DuckDuckGo 실제 호출 없이 검증
+﻿# web_search 서비스 단위 테스트 — DuckDuckGo 실제 호출 없이 검증
 import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -45,8 +45,11 @@ class TestShouldSearch:
     def test_true_when_java_exception(self):
         assert should_search("java.lang.NullPointerException at com.example") is True
 
-    def test_false_for_plain_question(self):
-        assert should_search("내일 날씨가 어때?") is False
+    def test_true_for_general_question(self):
+        assert should_search("내일 날씨가 어때?") is True
+
+    def test_false_for_short_greeting(self):
+        assert should_search("응?") is False
 
     def test_false_for_empty(self):
         assert should_search("") is False
@@ -75,7 +78,7 @@ class TestSearchWeb:
 
     def test_returns_empty_when_should_not_search(self):
         with _web_search_config():
-            result = search_web("안녕하세요")
+            result = search_web("응?")
         assert result == ""
 
     def test_returns_formatted_results(self):
@@ -106,3 +109,4 @@ class TestSearchWeb:
             result = search_web("[첨부 이미지 분석]\n오류", provider=provider)
         assert "A" * 200 in result
         assert "A" * 201 not in result
+

@@ -262,7 +262,7 @@ def _process_question(
         context_text = format_context_for_prompt(contexts)
 
         # 2. 최근 메시지 조회 (웹 검색과 독립적, DB 조회)
-        from db.repository import get_recent_messages
+        from db.repository import get_recent_messages, has_negative_feedback
         recent_msgs = get_recent_messages(
             session=session,
             channel_id=channel_id,
@@ -274,14 +274,28 @@ def _process_question(
             for m in recent_msgs
         )
 
-        # 3. 캐시 유사도 확인하여 웹 검색 스킵 여부 결정
+        # 3. 부정 피드백 컨텍스트 제거 + 유사도 기반 웹 검색 스킵 결정
+        top_bot_contexts = [
+            c for c in contexts
+            if c.get("similarity", 0.0) >= 0.90 and c.get("role") == "bot"
+        ]
+        if top_bot_contexts:
+            negative_ids = {
+                c["message_id"]
+                for c in top_bot_contexts
+                if c.get("message_id") and has_negative_feedback(session, c["message_id"])
+            }
+            if negative_ids:
+                contexts = [c for c in contexts if c.get("message_id") not in negative_ids]
+                context_text = format_context_for_prompt(contexts)
+                logger.info(f"부정 피드백 컨텍스트 {len(negative_ids)}건 제외")
+
         highest_similarity = max((c.get("similarity", 0.0) for c in contexts), default=0.0)
         web_search_block = ""
-        
+
         if highest_similarity >= 0.90:
-            logger.info(f"유사도 최상({highest_similarity:.2f}) 컨텍스트 발견, 웹 검색 생략")
+            logger.info(f"RAG 충분({highest_similarity:.2f}), 웹 검색 생략")
         else:
-            # 3-1. 웹 검색 (이미지 분석 포함 질문 또는 에러 로그 질문에 한해 실행)
             web_search_text = search_web(question)
             web_search_block = format_web_search_for_prompt(web_search_text)
 
@@ -485,7 +499,7 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
             if thread_ts:
                 thread_msgs = fetch_thread_history(client, channel_id, thread_ts, limit=20)
                 # 현재 메시지는 스레드 요약에서 제외 (마지막 메시지 제외)
-                if thread_msgs and len(thread_msgs) > 1:
+                if thread_msgs and len(thread_msgs) >= 3:
                     thread_summary = summarize_thread_context(thread_msgs[:-1])
 
             _process_question(
@@ -604,7 +618,7 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
             thread_summary = None
             if thread_ts:
                 thread_msgs = fetch_thread_history(client, channel_id, thread_ts, limit=20)
-                if thread_msgs and len(thread_msgs) > 1:
+                if thread_msgs and len(thread_msgs) >= 3:
                     thread_summary = summarize_thread_context(thread_msgs[:-1])
 
             _process_question(

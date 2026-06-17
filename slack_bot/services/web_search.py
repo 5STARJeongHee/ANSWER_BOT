@@ -1,4 +1,4 @@
-# 웹 검색 서비스 — DuckDuckGo HTML API를 httpx로 직접 호출하는 provider 구현
+﻿# 웹 검색 서비스 — DuckDuckGo HTML API를 httpx로 직접 호출하는 provider 구현
 from __future__ import annotations
 
 import logging
@@ -26,16 +26,22 @@ _ERROR_LOG_PATTERN = re.compile(
 _IMAGE_ANALYSIS_MARKER = "[첨부 이미지 분석]"
 
 
+_MIN_GENERAL_SEARCH_LEN = 10
+
+
 def should_search(question: str) -> bool:
     """
     웹 검색이 필요한 질문인지 판단한다.
-    아래 두 조건 중 하나를 만족하면 True를 반환한다.
-      1. 이미지 분석 결과가 포함된 질문 (vision 모델이 분석한 내용 첨부)
+    아래 조건 중 하나를 만족하면 True를 반환한다.
+      1. 이미지 분석 결과가 포함된 질문
       2. 에러 로그나 스택 트레이스가 포함된 기술 질문
+      3. 10자 이상의 일반 질문 (유사도 0.90 이상이면 event_handler에서 웹 검색 스킵)
     """
     if _IMAGE_ANALYSIS_MARKER in question:
         return True
     if _ERROR_LOG_PATTERN.search(question):
+        return True
+    if len(question.strip()) >= _MIN_GENERAL_SEARCH_LEN:
         return True
     return False
 
@@ -236,3 +242,4 @@ def format_web_search_for_prompt(search_text: str) -> str:
     if not search_text:
         return ""
     return f"[웹 검색 결과]\n{search_text}"
+
