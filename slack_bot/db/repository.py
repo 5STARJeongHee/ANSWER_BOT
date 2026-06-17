@@ -8,7 +8,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from db.models import ConversationMessage, ContextEmbedding, ContextSummary
+from db.models import ConversationMessage, ContextEmbedding, ContextSummary, MessageFeedback
 import config
 
 logger = logging.getLogger(__name__)
@@ -266,6 +266,36 @@ def save_summary(
     session.add(summary)
     session.flush()
     return summary
+
+
+def save_feedback(
+    session: Session,
+    *,
+    channel_id: str,
+    message_ts: str,
+    user_id: str,
+    reaction: str,
+    sentiment: str,
+) -> Optional[MessageFeedback]:
+    """
+    이모지 피드백을 저장한다.
+    동일 (message_ts, user_id, reaction) 조합이 이미 존재하면 None을 반환한다.
+    """
+    fb = MessageFeedback(
+        channel_id=channel_id,
+        message_ts=message_ts,
+        user_id=user_id,
+        reaction=reaction,
+        sentiment=sentiment,
+    )
+    try:
+        session.add(fb)
+        session.flush()
+        return fb
+    except IntegrityError:
+        session.rollback()
+        logger.debug(f"중복 피드백 무시: ts={message_ts} user={user_id} reaction={reaction}")
+        return None
 
 
 def get_latest_summary(

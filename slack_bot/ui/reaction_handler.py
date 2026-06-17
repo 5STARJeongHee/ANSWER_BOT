@@ -68,11 +68,7 @@ def _is_bot_message(client: WebClient, channel: str, message_ts: str) -> bool:
 
 
 def register_reaction_handlers(app: App, session_factory) -> None:
-    """
-    reaction_added 이벤트 핸들러를 Bolt 앱에 등록한다.
-    session_factory는 피드백 DB 저장이 구현될 Phase 2에서 활용한다.
-    현재는 로그 기록만 수행한다 (F-08은 Phase 2 항목).
-    """
+    """reaction_added 이벤트 핸들러를 Bolt 앱에 등록한다."""
 
     @app.event("reaction_added")
     def handle_reaction_added(event, client, ack) -> None:
@@ -92,29 +88,38 @@ def register_reaction_handlers(app: App, session_factory) -> None:
         channel: Optional[str] = item.get("channel")
         message_ts: Optional[str] = item.get("ts")
 
-        # 피드백 이모지가 아니면 무시
         is_positive = reaction in _POSITIVE_REACTIONS
         is_negative = reaction in _NEGATIVE_REACTIONS
         if not (is_positive or is_negative):
             return
 
-        if not channel or not message_ts:
+        if not channel or not message_ts or not user_id:
             return
 
-        # 봇이 작성한 메시지인지 확인 (사용자 메시지에 달린 이모지는 무시)
         if not _is_bot_message(client, channel, message_ts):
             return
 
         sentiment = "positive" if is_positive else "negative"
-        logger.info(
-            f"피드백 수신: channel={channel} message_ts={message_ts} "
-            f"user={user_id} reaction={reaction} sentiment={sentiment}"
-        )
 
-        # Phase 2: 피드백을 DB에 저장하는 로직을 여기에 추가한다.
-        # session = session_factory()
-        # try:
-        #     save_feedback(session, message_ts=message_ts, sentiment=sentiment, user_id=user_id)
-        #     session.commit()
-        # finally:
-        #     session.close()
+        from db.repository import save_feedback
+        session = session_factory()
+        try:
+            result = save_feedback(
+                session,
+                channel_id=channel,
+                message_ts=message_ts,
+                user_id=user_id,
+                reaction=reaction,
+                sentiment=sentiment,
+            )
+            session.commit()
+            if result:
+                logger.info(
+                    f"피드백 저장 완료: channel={channel} ts={message_ts} "
+                    f"user={user_id} reaction={reaction} sentiment={sentiment}"
+                )
+        except Exception as exc:
+            session.rollback()
+            logger.error(f"피드백 저장 실패: {exc}", exc_info=True)
+        finally:
+            session.close()

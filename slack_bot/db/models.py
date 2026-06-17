@@ -1,4 +1,4 @@
-# SQLAlchemy ORM 모델 정의 (conversation_message, context_embedding, context_summary)
+# SQLAlchemy ORM 모델 정의 (conversation_message, context_embedding, context_summary, message_feedback)
 from datetime import datetime
 
 from sqlalchemy import (
@@ -79,6 +79,31 @@ class ContextEmbedding(Base):
 
     def __repr__(self) -> str:
         return f"<ContextEmbedding id={self.id} source_message_id={self.source_message_id}>"
+
+
+class MessageFeedback(Base):
+    """봇 답변에 달린 이모지 피드백을 저장하는 테이블."""
+
+    __tablename__ = "message_feedback"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    channel_id = Column(String(20), nullable=False, index=True)
+    message_ts = Column(String(30), nullable=False, index=True)  # 봇 답변 ts
+    user_id = Column(String(20), nullable=False)
+    reaction = Column(String(50), nullable=False)   # thumbsup, thumbsdown 등
+    sentiment = Column(String(10), nullable=False)  # positive | negative
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        # 같은 사용자가 같은 메시지에 같은 이모지를 중복 저장하지 않는다.
+        UniqueConstraint("message_ts", "user_id", "reaction", name="uq_feedback_ts_user_reaction"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<MessageFeedback id={self.id} ts={self.message_ts} "
+            f"user={self.user_id} sentiment={self.sentiment}>"
+        )
 
 
 class ContextSummary(Base):
