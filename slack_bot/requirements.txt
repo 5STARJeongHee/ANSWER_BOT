@@ -27,5 +27,8 @@ python-dotenv==1.0.1
 httpx>=0.26,<0.28
 tenacity==9.0.0
 
+# 이미지 처리 (첨부 이미지 압축)
+Pillow>=10.0.0
+
 # 로깅
 structlog==24.4.0

@@ -85,7 +85,11 @@ EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "sentence-transformers/parap
 EMBEDDING_DIM: int = int(os.getenv("EMBEDDING_DIM", "768"))
 
 # RAG 검색 상위 K개
-RAG_TOP_K: int = int(os.getenv("RAG_TOP_K", "5"))
+RAG_TOP_K: int = int(os.getenv("RAG_TOP_K", "3"))
+# 유사도 임계값 — 이 값 미만의 청크는 컨텍스트에서 제외
+RAG_SIMILARITY_THRESHOLD: float = float(os.getenv("RAG_SIMILARITY_THRESHOLD", "0.55"))
+# RAG 청크 1개당 최대 문자 수
+RAG_CHUNK_MAX_CHARS: int = int(os.getenv("RAG_CHUNK_MAX_CHARS", "300"))
 # 최근 대화 포함 메시지 수
 RECENT_MESSAGE_COUNT: int = int(os.getenv("RECENT_MESSAGE_COUNT", "5"))
 

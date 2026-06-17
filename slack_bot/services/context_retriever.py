@@ -92,9 +92,17 @@ def retrieve_context(
             channel_id=channel_id,
             top_k=top_k,
         )
+        # 유사도 임계값 미만 청크 제거 (fallback 결과는 similarity=0.0이므로 제외 안 함)
+        filtered = [
+            r for r in results
+            if r["similarity"] == 0.0 or r["similarity"] >= config.RAG_SIMILARITY_THRESHOLD
+        ]
         query_preview = repr(search_query[:50])
-        logger.info(f"RAG 검색 완료: {len(results)}건 (쿼리={query_preview})")
-        return results
+        logger.info(
+            f"RAG 검색 완료: {len(filtered)}건 / 원본 {len(results)}건 "
+            f"(임계값={config.RAG_SIMILARITY_THRESHOLD}, 쿼리={query_preview})"
+        )
+        return filtered
     except Exception as exc:
         logger.error(f"RAG 검색 오류: {exc}", exc_info=True)
         session.rollback()
@@ -111,6 +119,7 @@ def format_context_for_prompt(contexts: list[dict]) -> str:
         similarity = ctx.get("similarity", 0.0)
         chunk = ctx.get("chunk_text", "").strip()
         if chunk:
+            chunk = chunk[:config.RAG_CHUNK_MAX_CHARS]
             lines.append(f"[{i}] (유사도: {similarity:.2f})\n{chunk}")
 
     return "\n\n".join(lines) if lines else "(관련 과거 대화 없음)"

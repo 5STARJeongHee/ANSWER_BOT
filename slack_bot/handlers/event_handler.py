@@ -22,6 +22,7 @@ from services.slack_service import (
     send_greeting_message,
     get_user_display_name,
 )
+from utils.image_processor import download_and_compress
 from utils.pii_filter import apply_pii_filter, has_pii
 from utils.token_counter import trim_messages_to_budget
 
@@ -53,6 +54,41 @@ _FALLBACK_EVAL_PROMPT = (
 def _clean_mention_text(text: str, bot_user_id: str) -> str:
     """@봇 멘션 텍스트에서 멘션 태그를 제거한다."""
     return text.replace(f"<@{bot_user_id}>", "").strip()
+
+
+_IMAGE_MIME_PREFIXES = ("image/jpeg", "image/png", "image/gif", "image/webp")
+
+_IMAGE_DESCRIBE_PROMPT = (
+    "이 이미지에 표시된 텍스트와 내용을 한국어로 요약해줘. "
+    "로그나 코드가 있으면 핵심 오류 메시지와 스택 트레이스를 포함해서 정리해줘."
+)
+
+
+def _extract_image_b64(event: dict, bot_token: str) -> Optional[str]:
+    """이벤트에서 첫 번째 이미지 파일을 찾아 다운로드 후 base64로 반환한다."""
+    files = event.get("files") or []
+    for f in files:
+        mime = f.get("mimetype", "")
+        if not any(mime.startswith(p) for p in _IMAGE_MIME_PREFIXES):
+            continue
+        url = f.get("url_private_download") or f.get("url_private")
+        if not url:
+            continue
+        b64 = download_and_compress(url, bot_token)
+        if b64:
+            return b64
+    return None
+
+
+def _describe_image(image_b64: str) -> str:
+    """이미지를 vision 모델로 분석하고 설명 텍스트를 반환한다. 실패 시 빈 문자열."""
+    from services.llm_service import call_vision
+    result = call_vision(image_b64, _IMAGE_DESCRIBE_PROMPT)
+    if result:
+        logger.info("이미지 분석 완료")
+        return result.strip()
+    logger.warning("이미지 분석 실패")
+    return ""
 
 
 def _evaluate_answer(question: str, draft_answer: str) -> bool:
@@ -368,6 +404,16 @@ def register_handlers(app: App, session_factory) -> None:
         def worker():
             user_name = get_user_display_name(client, user_id) if user_id else "익명"
 
+            # 첨부 이미지가 있으면 압축 후 vision 모델로 분석
+            effective_question = question
+            image_b64 = _extract_image_b64(event, config.SLACK_BOT_TOKEN)
+            if image_b64:
+                image_desc = _describe_image(image_b64)
+                if image_desc:
+                    effective_question = (
+                        f"[첨부 이미지 분석]\n{image_desc}\n\n{question}".strip()
+                    )
+
             _save_message_and_embed(
                 session_factory=session_factory,
                 event_id=event_id,
@@ -376,7 +422,7 @@ def register_handlers(app: App, session_factory) -> None:
                 message_ts=message_ts,
                 user_id=user_id,
                 role="user",
-                content=question,
+                content=effective_question,
                 is_question=True,
             )
 
@@ -385,7 +431,7 @@ def register_handlers(app: App, session_factory) -> None:
                 channel_id=channel_id,
                 thread_ts=thread_ts,
                 message_ts=message_ts,
-                question=question,
+                question=effective_question,
                 user_id=user_id,
                 user_name=user_name,
                 session_factory=session_factory,
@@ -473,6 +519,16 @@ def register_handlers(app: App, session_factory) -> None:
             if not classify_result.is_actionable:
                 return
 
+            # 첨부 이미지가 있으면 압축 후 vision 모델로 분석
+            effective_question = raw_text
+            image_b64 = _extract_image_b64(event, config.SLACK_BOT_TOKEN)
+            if image_b64:
+                image_desc = _describe_image(image_b64)
+                if image_desc:
+                    effective_question = (
+                        f"[첨부 이미지 분석]\n{image_desc}\n\n{raw_text}".strip()
+                    )
+
             user_name = get_user_display_name(client, user_id) if user_id else "익명"
             thinking_ts = post_thinking_indicator(
                 client=client, channel=channel_id, thread_ts=thread_ts or message_ts
@@ -483,7 +539,7 @@ def register_handlers(app: App, session_factory) -> None:
                 channel_id=channel_id,
                 thread_ts=thread_ts or message_ts,
                 message_ts=message_ts,
-                question=raw_text,
+                question=effective_question,
                 user_id=user_id,
                 user_name=user_name,
                 session_factory=session_factory,
