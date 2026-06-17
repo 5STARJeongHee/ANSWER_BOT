@@ -36,6 +36,10 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-slackbot}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-slackbot}
       MODEL_CONFIG_PATH: /app/properties.txt
       ENABLE_VECTOR_SEARCH: "true"
+      # LLM 백엔드: openrouter(기본) 또는 ollama
+      LLM_BACKEND: ${LLM_BACKEND:-openrouter}
+      # Ollama 사용 시 컨테이너 내부 서비스 주소 (호스트 직접 실행이면 http://host.docker.internal:11434/v1)
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434/v1}
     volumes:
       - ./properties.txt:/app/properties.txt:ro
       - fastembed_cache:/root/.cache/fastembed
@@ -45,8 +49,22 @@ services:
         max-size: "50m"
         max-file: "5"
 
+  ollama:
+    image: ollama/ollama:latest
+    container_name: slackbot_ollama
+    restart: unless-stopped
+    profiles:
+      - ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_models:/root/.ollama
+    # CPU 전용 서버이므로 GPU 설정 없음. AVX512는 llama.cpp가 자동 감지.
+
 volumes:
   pgdata:
     driver: local
   fastembed_cache:
+    driver: local
+  ollama_models:
     driver: local

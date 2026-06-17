@@ -2,6 +2,8 @@
 import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+# test_event_handler.py가 먼저 실행됐을 때 등록된 stub을 제거해 실제 모듈을 로드한다.
+sys.modules.pop("services.web_search", None)
 
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch

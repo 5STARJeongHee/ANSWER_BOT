@@ -1,4 +1,4 @@
-# OpenRouter API 통합 서비스 - 재시도/fallback 로직 포함
+# LLM 서비스 통합 모듈 — OpenRouter / Ollama 공통 재시도·fallback 로직
 from __future__ import annotations
 import json
 import logging
@@ -13,11 +13,11 @@ import config
 
 logger = logging.getLogger(__name__)
 
-# OpenRouter OpenAI 호환 클라이언트
+# OpenAI 호환 클라이언트 — LLM_BACKEND에 따라 OpenRouter 또는 Ollama에 연결
 _client = OpenAI(
-    api_key=config.OPENROUTER_API_KEY,
-    base_url=config.OPENROUTER_BASE_URL,
-    timeout=30.0,
+    api_key=config.LLM_API_KEY,
+    base_url=config.LLM_BASE_URL,
+    timeout=config.LLM_TIMEOUT,
 )
 
 # JSON 마크다운 펜스 제거 패턴 (Gemma 등의 모델이 ```json ... ``` 래핑)
@@ -144,7 +144,7 @@ def call_summary(messages: list[dict]) -> Optional[str]:
 def call_rag_query(messages: list[dict]) -> Optional[str]:
     """RAG 검색 쿼리 생성 모델을 호출한다."""
     return call_with_fallback(
-        model_chain=[config.RAG_QUERY_MODEL, config.CLASSIFIER_MODEL],
+        model_chain=config.RAG_QUERY_FALLBACK_CHAIN,
         messages=messages,
         max_tokens=100,
     )
