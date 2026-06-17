@@ -34,6 +34,12 @@ _pil_stub = MagicMock()
 sys.modules.setdefault("PIL", _pil_stub)
 sys.modules.setdefault("PIL.Image", _pil_stub)
 
+# web_search stub (httpx DDG 호출 방지)
+_web_search_stub = MagicMock()
+_web_search_stub.search_web = MagicMock(return_value="")
+_web_search_stub.format_web_search_for_prompt = MagicMock(return_value="")
+sys.modules.setdefault("services.web_search", _web_search_stub)
+
 import pytest
 
 # Bolt App 임포트를 피하기 위해 handlers.event_handler의 헬퍼들을 직접 임포트한다.

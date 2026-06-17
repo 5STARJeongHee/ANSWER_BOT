@@ -12,6 +12,7 @@ from db.repository import upsert_message
 from services.classifier import classify_message, MessageCategory
 from services.context_retriever import retrieve_context, format_context_for_prompt, embed_text
 from services.llm_service import call_qa
+from services.web_search import search_web, format_web_search_for_prompt
 from services.slack_service import (
     post_thinking_indicator,
     update_message,
@@ -34,6 +35,16 @@ logger = logging.getLogger(__name__)
 _QA_SYSTEM_PROMPT = (
     "너는 사내 업무 지원 Slack 챗봇이다. 정확하고 간결하게 한국어로 답변하라.\n"
     "모르는 내용은 추측하지 말고 '확인이 필요합니다'라고 답하라.\n"
+    "답변은 2~5문장 내로 핵심만 전달하라.\n"
+    "AI 생성 답변임을 사용자가 인지할 수 있도록 답변 끝에 '[AI 생성 답변]'을 덧붙인다."
+)
+
+# 웹 검색 결과가 있을 때 사용하는 시스템 프롬프트.
+# [웹 검색 결과] 섹션을 근거로 답변하도록 명시적으로 안내한다.
+_QA_SYSTEM_PROMPT_WITH_WEB = (
+    "너는 사내 업무 지원 Slack 챗봇이다. 정확하고 간결하게 한국어로 답변하라.\n"
+    "[웹 검색 결과] 섹션의 내용을 근거로 답변하라. "
+    "해당 결과가 질문을 직접 뒷받침하지 못할 때만 '확인이 필요합니다'라고 답하라.\n"
     "답변은 2~5문장 내로 핵심만 전달하라.\n"
     "AI 생성 답변임을 사용자가 인지할 수 있도록 답변 끝에 '[AI 생성 답변]'을 덧붙인다."
 )
@@ -202,7 +213,7 @@ def _process_question(
         )
         context_text = format_context_for_prompt(contexts)
 
-        # 2. 최근 메시지 조회
+        # 2. 최근 메시지 조회 (웹 검색과 독립적, DB 조회)
         from db.repository import get_recent_messages
         recent_msgs = get_recent_messages(
             session=session,
@@ -215,25 +226,31 @@ def _process_question(
             for m in recent_msgs
         )
 
-        # 3. QA 프롬프트 구성
+        # 3. 웹 검색 (이미지 분석 포함 질문 또는 에러 로그 질문에 한해 실행)
+        web_search_text = search_web(question)
+        web_search_block = format_web_search_for_prompt(web_search_text)
+
+        # 4. QA 프롬프트 구성 (웹 검색 결과는 RAG 컨텍스트 뒤에 배치)
+        system_prompt = _QA_SYSTEM_PROMPT_WITH_WEB if web_search_block else _QA_SYSTEM_PROMPT
         user_message_content = (
             f"[참고 컨텍스트 - 과거 관련 대화]\n{context_text}\n\n"
-            f"[최근 대화 이력]\n{recent_text or '(없음)'}\n\n"
+            + (f"{web_search_block}\n\n" if web_search_block else "")
+            + f"[최근 대화 이력]\n{recent_text or '(없음)'}\n\n"
             f"[현재 질문]\n작성자: {user_name}\n내용: {question}"
         )
         messages = [
-            {"role": "system", "content": _QA_SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_message_content},
         ]
 
-        # 4. 토큰 예산 내로 메시지 정리
+        # 5. 토큰 예산 내로 메시지 정리
         messages_trimmed = trim_messages_to_budget(
             messages=messages,
-            system_prompt=_QA_SYSTEM_PROMPT,
+            system_prompt=system_prompt,
             max_tokens=config.MAX_CONTEXT_TOKENS,
         )
 
-        # 5. 답변 생성
+        # 6. 답변 생성
         answer = call_qa(messages_trimmed)
         if not answer:
             logger.error("QA 모델에서 답변 생성 실패")
@@ -246,7 +263,7 @@ def _process_question(
             )
             return
 
-        # 6. Fallback 평가
+        # 7. Fallback 평가
         can_answer = _evaluate_answer(question, answer)
         if not can_answer:
             logger.info(f"Fallback 판단: 답변 불확실 (question={question[:50]!r})")
@@ -271,7 +288,7 @@ def _process_question(
             )
             return
 
-        # 7. 답변 전송 (Block Kit)
+        # 8. 답변 전송 (Block Kit)
         context_count = len(contexts)
         sent_ts = post_answer(
             client=client,
@@ -282,12 +299,12 @@ def _process_question(
             thinking_ts=thinking_ts,
         )
 
-        # 8. 피드백 이모지 시드 추가 (reactions:write 스코프 필요)
+        # 9. 피드백 이모지 시드 추가 (reactions:write 스코프 필요)
         if sent_ts:
             from ui.reaction_handler import add_feedback_reactions
             add_feedback_reactions(client=client, channel=channel_id, message_ts=sent_ts)
 
-        # 9. 봇 응답 저장
+        # 10. 봇 응답 저장
         _save_message_and_embed(
             session_factory=session_factory,
             event_id=None,
