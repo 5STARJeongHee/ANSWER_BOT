@@ -54,11 +54,18 @@ def _extract_search_query(question: str) -> str:
     - free-tier 모델 레이트 리밋 압박을 추가하지 않는다.
     """
     if _IMAGE_ANALYSIS_MARKER in question:
-        # [첨부 이미지 분석]\n<분석 텍스트>\n\n<원본 질문> 구조에서 분석 텍스트 첫 줄 추출
+        # [첨부 이미지 분석]\n<분석 텍스트>\n\n<원본 질문> 구조에서 실제 오류 라인 추출
         after_marker = question.split(_IMAGE_ANALYSIS_MARKER, 1)[-1].strip()
-        first_line = after_marker.splitlines()[0].strip() if after_marker else ""
-        if first_line:
-            return first_line[:120]
+        # 1순위: 에러 패턴이 포함된 줄
+        for line in after_marker.splitlines():
+            line = line.strip()
+            if line and _ERROR_LOG_PATTERN.search(line) and len(line) > 5:
+                return line[:120]
+        # 2순위: 서문이 아닌 첫 번째 실질적 줄 (":"로 끝나는 서문 줄 건너뜀)
+        for line in after_marker.splitlines():
+            line = line.strip()
+            if line and not line.endswith(":") and len(line) > 10:
+                return line[:120]
 
     # 에러 로그: Error:/Exception: 이후 첫 번째 의미 있는 라인 추출
     for line in question.splitlines():

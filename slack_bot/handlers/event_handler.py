@@ -2,6 +2,7 @@
 from __future__ import annotations
 import logging
 import threading
+import time
 from typing import Optional
 
 from slack_bolt import App
@@ -28,6 +29,27 @@ from utils.pii_filter import apply_pii_filter, has_pii
 from utils.token_counter import trim_messages_to_budget
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# 이벤트 중복 방지 (Socket Mode는 기본 2개 연결로 동일 이벤트를 두 번 전달함)
+# ---------------------------------------------------------------------------
+_processed_events: dict[str, float] = {}
+_event_lock = threading.Lock()
+_EVENT_DEDUP_TTL = 60.0  # 초 — 이 시간 내 동일 event_id는 한 번만 처리
+
+
+def _is_duplicate_event(event_id: str) -> bool:
+    """동일 event_id가 TTL 내에 이미 처리됐으면 True를 반환한다."""
+    now = time.monotonic()
+    with _event_lock:
+        expired = [k for k, v in _processed_events.items() if now - v > _EVENT_DEDUP_TTL]
+        for k in expired:
+            del _processed_events[k]
+        if event_id in _processed_events:
+            return True
+        _processed_events[event_id] = now
+        return False
+
 
 # ---------------------------------------------------------------------------
 # QA 프롬프트 상수
@@ -62,8 +84,9 @@ def _clean_mention_text(text: str, bot_user_id: str) -> str:
 _IMAGE_MIME_PREFIXES = ("image/jpeg", "image/png", "image/gif", "image/webp")
 
 _IMAGE_DESCRIBE_PROMPT = (
-    "이 이미지에 표시된 텍스트와 내용을 한국어로 요약해줘. "
-    "로그나 코드가 있으면 핵심 오류 메시지와 스택 트레이스를 포함해서 정리해줘."
+    "이 이미지에서 텍스트를 추출해줘. "
+    "서문이나 설명 없이 오류 메시지, 예외 클래스명, 스택 트레이스 라인만 한 줄씩 나열해줘. "
+    "텍스트가 없으면 이미지에서 보이는 내용을 간결하게 한 줄로 설명해줘."
 )
 
 
@@ -384,6 +407,11 @@ def register_handlers(app: App, session_factory) -> None:
         user_id = event.get("user")
         raw_text = event.get("text", "")
 
+        # Socket Mode는 2개 연결을 유지하므로 동일 이벤트가 두 번 전달될 수 있다.
+        if _is_duplicate_event(event_id):
+            logger.debug(f"중복 이벤트 무시: event_id={event_id}")
+            return
+
         # 멘션 태그 제거
         question = _clean_mention_text(raw_text, bot_user_id or "")
 
@@ -395,8 +423,6 @@ def register_handlers(app: App, session_factory) -> None:
             )
             return
 
-        # 중복 이벤트 조회 (DB 저장 전 사전 체크)
-        # 실제 DB 중복 방지는 upsert_message의 unique constraint이 보장
         logger.info(f"앱 멘션 수신: channel={channel_id} user={user_id} text={question[:50]!r}")
 
         # 즉시 '답변 중' 표시 전송 (3초 이내 ack 이후)
@@ -470,6 +496,10 @@ def register_handlers(app: App, session_factory) -> None:
         event_id = event.get("event_ts") or message_ts
         user_id = event.get("user")
         raw_text = event.get("text", "")
+
+        if _is_duplicate_event(event_id):
+            logger.debug(f"중복 메시지 이벤트 무시: event_id={event_id}")
+            return
 
         if not raw_text or not raw_text.strip():
             return

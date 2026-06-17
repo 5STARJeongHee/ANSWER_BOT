@@ -15,7 +15,8 @@ rag_query_model: "openai/gpt-oss-20b:free"
 # 모델 교체 및 조합은 docs/OLLAMA_MODELS.md 참고
 
 # QA / 요약 (체급 다운사이징 32B ➡️ 14B): CPU 점유 시간을 대폭 줄여 웹/DB 지연 방지
-ollama_qa_model: "deepseek-r1:14b-qwen-distill-q4_K_M"       # 성능 중심 (추론/논리 향상, ~9GB)
+# ollama_qa_model: "deepseek-r1:14b-qwen-distill-q4_K_M"       # 성능 중심 (추론/논리 향상, ~9GB)
+ollama_qa_model: "qwen2.5:14b-instruct-q4_K_M"          # 요약과 통일된 모델로 깔끔한 답변 (추론은 약간 떨어질 수 있음, ~9GB)
 # 만약 슬랙봇의 코딩/파이썬 답변 퀄리티를 극대화하고 싶다면 현재 페이지의 모델 적용 가능:
 # ollama_qa_model: "hf.co/yuxinlu1/gemma-4-12B-coder-fable5-composer2.5-v1-GGUF:Q4_K_M" (~7.4GB)
 
