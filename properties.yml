@@ -1,0 +1,26 @@
+# 모델 설정 파일 — LLM_BACKEND 값에 따라 해당 섹션의 모델이 사용됩니다.
+# 변경 후 앱만 재시작하면 됩니다: docker compose restart app
+
+# --- OpenRouter 모델 설정 (LLM_BACKEND=openrouter) ---
+image: "nvidia/nemotron-nano-12b-v2-vl:free"
+text: "nex-agi/nex-n2-pro:free"
+classifier_model: "openai/gpt-oss-20b:free"
+qa_model: "nex-agi/nex-n2-pro:free"
+summary_model: "nex-agi/nex-n2-pro:free"
+rag_query_model: "openai/gpt-oss-20b:free"
+
+# --- Ollama 로컬 모델 설정 (LLM_BACKEND=ollama) ---
+# 서버 사양: Xeon Silver 4208 x2, 251GB RAM (GPU 없음, CPU 추론)
+# 메모리 합계: QA ~17GB + Classifier ~1.3GB + Vision ~5GB = ~23GB
+# 모델 교체 및 조합은 docs/OLLAMA_MODELS.md 참고
+
+# QA/요약: Qwen2.5-32B — 한국어 최상위 오픈소스 (Apache 2.0), Q4_K_M 약 17GB
+ollama_qa_model: "qwen2.5:32b-instruct-q4_K_M"
+ollama_summary_model: "qwen2.5:32b-instruct-q4_K_M"
+
+# 분류기/RAG: EXAONE-3.5-2.4B — LG AI Research 한국어 특화 (LGPL-3.0), Q4_K_M 약 1.3GB
+ollama_classifier_model: "exaone3.5:2.4b-it-q4_K_M"
+ollama_rag_query_model: "exaone3.5:2.4b-it-q4_K_M"
+
+# 비전: Qwen2-VL-7B — 한국어+이미지 이해 최고 성능 (Apache 2.0), Q4_K_M 약 5GB
+ollama_image: "qwen2-vl:7b-instruct-q4_K_M"

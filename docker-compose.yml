@@ -34,14 +34,14 @@ services:
     environment:
       # .env의 DATABASE_URL을 Docker 내부 네트워크 주소로 덮어씀
       DATABASE_URL: postgresql://${POSTGRES_USER:-slackbot}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-slackbot}
-      MODEL_CONFIG_PATH: /app/properties.txt
+      MODEL_CONFIG_PATH: /app/properties.yml
       ENABLE_VECTOR_SEARCH: "true"
       # LLM 백엔드: openrouter(기본) 또는 ollama
       LLM_BACKEND: ${LLM_BACKEND:-openrouter}
       # Ollama 사용 시 컨테이너 내부 서비스 주소 (호스트 직접 실행이면 http://host.docker.internal:11434/v1)
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434/v1}
     volumes:
-      - ./properties.txt:/app/properties.txt:ro
+      - ./properties.yml:/app/properties.yml:ro
       - fastembed_cache:/root/.cache/fastembed
     logging:
       driver: "json-file"

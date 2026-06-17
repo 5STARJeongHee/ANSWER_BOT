@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import logging
 from pathlib import Path
+import yaml
 from dotenv import load_dotenv
 
 # .env 파일 로드 (UTF-8 우선, CP949 폴백 — Windows 한국어 환경 대응)
@@ -15,25 +16,22 @@ logger = logging.getLogger(__name__)
 
 
 def _load_properties(path: str) -> dict:
-    """properties.txt 파일에서 모델 설정을 로드한다."""
-    result = {}
+    """properties.yml 파일에서 모델 설정을 로드한다."""
     props_path = Path(path)
     if not props_path.exists():
         logger.warning(f"모델 설정 파일을 찾을 수 없음: {path}")
-        return result
+        return {}
     with open(props_path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if ":" in line:
-                key, _, value = line.partition(":")
-                result[key.strip()] = value.strip()
-    return result
+        data = yaml.safe_load(f)
+    if not isinstance(data, dict):
+        logger.warning(f"모델 설정 파일 형식 오류 (dict 아님): {path}")
+        return {}
+    # 모든 값을 문자열로 정규화한다.
+    return {k: str(v) for k, v in data.items()}
 
 
-# 모델 설정 로드 (properties.txt)
-_model_config_path = os.getenv("MODEL_CONFIG_PATH", "../properties.txt")
+# 모델 설정 로드 (properties.yml)
+_model_config_path = os.getenv("MODEL_CONFIG_PATH", "../properties.yml")
 _props = _load_properties(_model_config_path)
 
 # --- Slack 설정 ---
