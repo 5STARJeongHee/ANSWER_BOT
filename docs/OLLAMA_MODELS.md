@@ -96,7 +96,7 @@ Slack에서 받은 이미지(에러 스크린샷 등)를 분석합니다.
 
 | 모델 | 크기 | RAM | 한국어 | 특징 |
 |------|------|-----|--------|------|
-| `qwen2-vl:7b-instruct-q4_K_M` | 7B | ~5GB | 최상 | 한국어+이미지 현재 최고 |
+| `qwen2.5vl:7b-q4_K_M` | 7B | ~5GB | 최상 | 한국어+이미지 현재 최고 |
 | `minicpm-v:8b-q4_K_M` | 8B | ~4.3GB | 우수 | 문서 이미지 인식 강점 |
 | `llava:13b-v1.6-mistral-q4_K_M` | 13B | ~7GB | 보통 | 안정적, 영어 위주 |
 
@@ -117,7 +117,7 @@ ollama_qa_model: hf.co/yuxinlu1/gemma-4-12B-coder-fable5-composer2.5-v1-GGUF:Q4_
 ollama_summary_model: hf.co/yuxinlu1/gemma-4-12B-coder-fable5-composer2.5-v1-GGUF:Q4_K_M
 ollama_classifier_model: exaone3.5:2.4b-it-q4_K_M
 ollama_rag_query_model: exaone3.5:2.4b-it-q4_K_M
-ollama_image: qwen2-vl:7b-instruct-q4_K_M
+ollama_image: qwen2.5vl:7b-q4_K_M
 ```
 
 ### 조합 B — 한국어 균형 (RAM ~27GB)
@@ -129,7 +129,7 @@ ollama_qa_model: qwen2.5:32b-instruct-q4_K_M
 ollama_summary_model: qwen2.5:32b-instruct-q4_K_M
 ollama_classifier_model: exaone3.5:2.4b-it-q4_K_M
 ollama_rag_query_model: exaone3.5:2.4b-it-q4_K_M
-ollama_image: qwen2-vl:7b-instruct-q4_K_M
+ollama_image: qwen2.5vl:7b-q4_K_M
 ```
 
 ### 조합 C — 코딩 특화 + 한국어 분류 (RAM ~22GB)
@@ -141,7 +141,7 @@ ollama_qa_model: hf.co/yuxinlu1/gemma-4-12B-coder-fable5-composer2.5-v1-GGUF:Q4_
 ollama_summary_model: qwen2.5:14b-instruct-q4_K_M
 ollama_classifier_model: exaone3.5:2.4b-it-q4_K_M
 ollama_rag_query_model: exaone3.5:2.4b-it-q4_K_M
-ollama_image: qwen2-vl:7b-instruct-q4_K_M
+ollama_image: qwen2.5vl:7b-q4_K_M
 ```
 
 ### 조합 D — 한국어 최대 성능 (RAM ~45GB)
@@ -153,7 +153,7 @@ ollama_qa_model: qwen2.5:32b-instruct-q4_K_M
 ollama_summary_model: qwen2.5:32b-instruct-q4_K_M
 ollama_classifier_model: exaone3.5:7.8b-it-q4_K_M
 ollama_rag_query_model: exaone3.5:7.8b-it-q4_K_M
-ollama_image: qwen2-vl:7b-instruct-q4_K_M
+ollama_image: qwen2.5vl:7b-q4_K_M
 ```
 
 ---
@@ -174,7 +174,8 @@ docker exec slackbot_ollama ollama pull exaone3.5:2.4b-it-q4_K_M
 docker exec slackbot_ollama ollama pull exaone3.5:7.8b-it-q4_K_M
 
 # 이미지
-docker exec slackbot_ollama ollama pull qwen2-vl:7b-instruct-q4_K_M
+docker exec slackbot_ollama ollama pull qwen2.5vl:3b-q4_K_M
+docker exec slackbot_ollama ollama pull qwen2.5vl:7b-q4_K_M
 docker exec slackbot_ollama ollama pull llava:13b-v1.6-mistral-q4_K_M
 docker exec slackbot_ollama ollama pull minicpm-v:8b-q4_K_M
 ```
