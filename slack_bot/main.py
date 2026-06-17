@@ -46,14 +46,22 @@ def main() -> None:
         signing_secret=config.SLACK_SIGNING_SECRET,
     )
 
+    # 봇 user_id 사전 취득 — 이벤트/리액션 핸들러가 공유한다.
+    try:
+        bot_user_id: str = app.client.auth_test()["user_id"]
+        logger.info(f"봇 user_id 확인: {bot_user_id}")
+    except Exception as exc:
+        logger.warning(f"auth_test 실패, bot_user_id 없이 동작: {exc}")
+        bot_user_id = None
+
     # 4. 이벤트 핸들러 등록
     from handlers.event_handler import register_handlers
-    register_handlers(app=app, session_factory=session_factory)
+    register_handlers(app=app, session_factory=session_factory, bot_user_id=bot_user_id)
     logger.info("이벤트 핸들러 등록 완료")
 
     # 4-1. 리액션 핸들러 등록 (👍/👎 피드백 수집, reactions:read 스코프 필요)
     from ui.reaction_handler import register_reaction_handlers
-    register_reaction_handlers(app=app, session_factory=session_factory)
+    register_reaction_handlers(app=app, session_factory=session_factory, bot_user_id=bot_user_id)
     logger.info("리액션 핸들러 등록 완료")
 
     # 5. APScheduler 시작

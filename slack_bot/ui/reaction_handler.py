@@ -5,7 +5,6 @@ import logging
 from typing import Optional
 
 from slack_bolt import App
-from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
 logger = logging.getLogger(__name__)
@@ -43,31 +42,7 @@ def add_feedback_reactions(
                 logger.warning(f"시드 이모지 추가 실패 (emoji={emoji}): {exc}")
 
 
-def _is_bot_message(client: WebClient, channel: str, message_ts: str) -> bool:
-    """
-    주어진 ts의 메시지가 봇이 작성한 메시지인지 확인한다.
-    conversations_history 호출에 실패하면 False를 반환하여 피드백 수집을 건너뛴다.
-    """
-    try:
-        response = client.conversations_history(
-            channel=channel,
-            latest=message_ts,
-            oldest=message_ts,
-            inclusive=True,
-            limit=1,
-        )
-        messages = response.get("messages", [])
-        if not messages:
-            return False
-        msg = messages[0]
-        # Slack 봇 메시지는 bot_id 필드를 가진다.
-        return bool(msg.get("bot_id"))
-    except SlackApiError as exc:
-        logger.warning(f"메시지 유형 확인 실패 (ts={message_ts}): {exc}")
-        return False
-
-
-def register_reaction_handlers(app: App, session_factory) -> None:
+def register_reaction_handlers(app: App, session_factory, bot_user_id: Optional[str] = None) -> None:
     """reaction_added 이벤트 핸들러를 Bolt 앱에 등록한다."""
 
     @app.event("reaction_added")
@@ -77,16 +52,26 @@ def register_reaction_handlers(app: App, session_factory) -> None:
 
         필터링 규칙.
         - 피드백 이모지(👍/👎 계열)만 처리한다.
-        - 봇 자신이 추가한 시드 이모지는 무시한다 (bot_id 필드로 판별).
-        - 봇이 작성한 메시지에 달린 리액션만 집계한다.
+        - 봇 자신이 추가한 시드 이모지는 무시한다 (user 필드로 판별).
+        - item_user가 봇인 메시지(봇이 작성한 메시지)에 달린 리액션만 집계한다.
         """
         ack()
 
         reaction: str = event.get("reaction", "")
         user_id: Optional[str] = event.get("user")
+        item_user: Optional[str] = event.get("item_user")
         item: dict = event.get("item", {})
         channel: Optional[str] = item.get("channel")
         message_ts: Optional[str] = item.get("ts")
+
+        logger.info(
+            f"reaction_added 수신: reaction={reaction} user={user_id} "
+            f"item_user={item_user} channel={channel} ts={message_ts}"
+        )
+
+        # 봇 자신이 추가한 시드 이모지 무시
+        if bot_user_id and user_id == bot_user_id:
+            return
 
         is_positive = reaction in _POSITIVE_REACTIONS
         is_negative = reaction in _NEGATIVE_REACTIONS
@@ -96,7 +81,9 @@ def register_reaction_handlers(app: App, session_factory) -> None:
         if not channel or not message_ts or not user_id:
             return
 
-        if not _is_bot_message(client, channel, message_ts):
+        # item_user가 봇인 메시지만 집계 (channels:history 스코프 불필요)
+        if bot_user_id and item_user != bot_user_id:
+            logger.debug(f"봇 메시지 아님, 무시: item_user={item_user} bot={bot_user_id}")
             return
 
         sentiment = "positive" if is_positive else "negative"

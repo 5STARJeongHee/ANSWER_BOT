@@ -382,18 +382,12 @@ def _send_error_or_fallback(
 # Bolt 이벤트 핸들러 등록
 # ---------------------------------------------------------------------------
 
-def register_handlers(app: App, session_factory) -> None:
+def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = None) -> None:
     """
     Bolt 앱에 이벤트 핸들러를 등록한다.
     session_factory는 스레드 안전한 scoped_session이어야 한다.
+    bot_user_id는 main.py에서 auth_test()로 획득해 전달한다.
     """
-    # auth_test는 시작 시 1회만 호출하여 매 이벤트마다 API 왕복을 방지한다.
-    try:
-        bot_user_id: Optional[str] = app.client.auth_test()["user_id"]
-        logger.info(f"봇 user_id 확인 완료: {bot_user_id}")
-    except Exception as exc:
-        logger.warning(f"auth_test 실패, bot_user_id 없이 동작합니다: {exc}")
-        bot_user_id = None
 
     @app.event("app_mention")
     def handle_mention(event, client, ack, say):
