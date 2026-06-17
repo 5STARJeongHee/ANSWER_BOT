@@ -96,6 +96,41 @@ def summarize_channel(
     return summary_text
 
 
+def summarize_thread_context(thread_messages: list[dict]) -> Optional[str]:
+    """
+    주어진 스레드 메시지(딕셔너리 리스트)를 짧은 문맥으로 요약한다.
+    스레드가 너무 길 경우 토큰 제한을 막기 위해 사용된다.
+    """
+    if not thread_messages:
+        return None
+
+    # Slack API dict 형식을 단순 텍스트 로그로 변환
+    lines = []
+    for msg in thread_messages:
+        user_id = msg.get("user") or msg.get("bot_id") or "?"
+        text = (msg.get("text") or "").strip()
+        if text:
+            lines.append(f"[{user_id}]: {text}")
+    
+    conversation_log = "\n".join(lines)
+    if not conversation_log.strip():
+        return None
+
+    prompt = (
+        "다음은 슬랙 스레드의 이전 대화 내용이다. "
+        "마지막 질문에 답변하기 위해 필요한 핵심 문맥과 흐름을 2~3문장 이내로 짧게 요약하라.\n\n"
+        f"[스레드 대화 시작]\n{conversation_log[:4000]}\n[대화 끝]"
+    )
+
+    llm_messages = [
+        {"role": "system", "content": "너는 대화의 핵심 문맥을 짧게 파악하는 AI다."},
+        {"role": "user", "content": prompt},
+    ]
+
+    summary = call_summary(llm_messages)
+    return summary.strip() if summary else None
+
+
 def run_weekly_summary(session: Session) -> None:
     """
     모든 대상 채널에 대해 지난 주 대화를 요약하는 배치를 실행한다.

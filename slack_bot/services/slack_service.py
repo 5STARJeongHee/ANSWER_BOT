@@ -222,6 +222,49 @@ def fetch_channel_history(
     return messages[:limit]
 
 
+def fetch_thread_history(
+    client: WebClient,
+    channel_id: str,
+    thread_ts: str,
+    limit: int = 50,
+) -> list[dict]:
+    """
+    스레드 내의 메시지 이력을 수집한다.
+    컨텍스트 한계를 고려하여 최대 limit 개수만큼 가져온다.
+    """
+    messages = []
+    cursor = None
+
+    while True:
+        kwargs: dict = {
+            "channel": channel_id,
+            "ts": thread_ts,
+            "limit": min(limit, 200)
+        }
+        if cursor:
+            kwargs["cursor"] = cursor
+
+        try:
+            response = _with_retry(client.conversations_replies, **kwargs)
+            if not response or not response.get("ok"):
+                break
+
+            batch = response.get("messages", [])
+            messages.extend(batch)
+
+            # 페이지네이션
+            meta = response.get("response_metadata", {})
+            cursor = meta.get("next_cursor")
+            if not cursor or len(messages) >= limit:
+                break
+
+        except SlackApiError as exc:
+            logger.error(f"스레드 이력 조회 실패 (channel={channel_id}, thread={thread_ts}): {exc}")
+            break
+
+    return messages[:limit]
+
+
 def get_user_info(client: WebClient, user_id: str) -> Optional[dict]:
     """Slack 사용자 정보를 조회한다."""
     try:

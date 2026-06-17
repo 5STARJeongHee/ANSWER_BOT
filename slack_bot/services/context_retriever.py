@@ -1,4 +1,4 @@
-# pgvector 유사도 검색 기반 RAG 컨텍스트 검색 서비스
+﻿# pgvector 유사도 검색 기반 RAG 컨텍스트 검색 서비스
 from __future__ import annotations
 import logging
 from typing import Optional
@@ -39,21 +39,23 @@ def embed_text(text: str) -> Optional[list[float]]:
         return None
 
 
-def _generate_rag_query(question: str) -> str:
+def _generate_rag_query(question: str, thread_summary: Optional[str] = None) -> str:
     """
-    질문에서 검색 쿼리를 LLM으로 생성한다.
-    LLM 호출 실패 시 원본 질문을 그대로 사용한다.
+    질문(과 필요시 스레드 요약)에서 핵심 키워드와 의도를 추출하여
+    과거 대화 검색에 사용할 검색 쿼리 문장을 1개 생성한다.
     """
+    system_content = (
+        "다음 질문에서 핵심 키워드와 의도를 추출하여 "
+        "과거 대화 검색에 사용할 검색 쿼리 문장을 1개 생성하라. "
+        "한국어로 출력하고 쿼리만 반환한다."
+    )
+    user_content = f"질문: {question}"
+    if thread_summary:
+        user_content = f"[스레드 이전 문맥]\n{thread_summary}\n\n질문: {question}"
+
     messages = [
-        {
-            "role": "system",
-            "content": (
-                "다음 질문에서 핵심 키워드와 의도를 추출하여 "
-                "과거 대화 검색에 사용할 검색 쿼리 문장을 1개 생성하라. "
-                "한국어로 출력하고 쿼리만 반환한다."
-            ),
-        },
-        {"role": "user", "content": f"질문: {question}"},
+        {"role": "system", "content": system_content},
+        {"role": "user", "content": user_content},
     ]
     result = call_rag_query(messages)
     if result and result.strip():
@@ -66,6 +68,7 @@ def retrieve_context(
     question: str,
     channel_id: Optional[str] = None,
     top_k: int = None,
+    thread_summary: Optional[str] = None,
 ) -> list[dict]:
     """
     질문과 유사한 과거 대화 청크를 검색하여 반환한다.
@@ -75,7 +78,7 @@ def retrieve_context(
         top_k = config.RAG_TOP_K
 
     # 1. RAG 검색 쿼리 생성
-    search_query = _generate_rag_query(question)
+    search_query = _generate_rag_query(question, thread_summary)
     logger.debug(f"RAG 검색 쿼리: {search_query!r}")
 
     # 2. 쿼리 임베딩 생성
@@ -118,8 +121,18 @@ def format_context_for_prompt(contexts: list[dict]) -> str:
     for i, ctx in enumerate(contexts, 1):
         similarity = ctx.get("similarity", 0.0)
         chunk = ctx.get("chunk_text", "").strip()
+        role = ctx.get("role", "")
+        if role == "user":
+            role_label = "[사람 답변]"
+        elif role == "bot":
+            role_label = "[봇 답변]"
+        else:
+            role_label = ""
         if chunk:
             chunk = chunk[:config.RAG_CHUNK_MAX_CHARS]
-            lines.append(f"[{i}] (유사도: {similarity:.2f})\n{chunk}")
+            header = f"[{i}] (유사도: {similarity:.2f})"
+            if role_label:
+                header += f" {role_label}"
+            lines.append(f"{header}\n{chunk}")
 
     return "\n\n".join(lines) if lines else "(관련 과거 대화 없음)"

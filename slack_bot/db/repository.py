@@ -1,4 +1,4 @@
-# 데이터베이스 CRUD 함수 모음 - 모든 DB 접근은 이 모듈을 통한다
+﻿# 데이터베이스 CRUD 함수 모음 - 모든 DB 접근은 이 모듈을 통한다
 from __future__ import annotations
 import logging
 from datetime import date, datetime
@@ -189,21 +189,21 @@ def _vector_search(
     """pgvector 코사인 유사도 검색."""
     vec_str = "[" + ",".join(str(v) for v in query_embedding) + "]"
 
+    # role 포함을 위해 항상 conversation_message JOIN
     channel_filter = ""
     params: dict = {"vec": vec_str, "top_k": top_k}
     if channel_id:
-        channel_filter = (
-            "JOIN conversation_message m ON ce.source_message_id = m.id "
-            "WHERE m.channel_id = :channel_id"
-        )
+        channel_filter = "WHERE m.channel_id = :channel_id"
         params["channel_id"] = channel_id
 
     # CAST(:vec AS vector) 사용 — :vec::vector 형태는 SQLAlchemy 파라미터 파싱과 충돌
     sql = text(
         f"SELECT ce.chunk_text, "
         f"1 - (ce.embedding <=> CAST(:vec AS vector)) AS similarity, "
-        f"ce.source_message_id "
+        f"ce.source_message_id, "
+        f"m.role "
         f"FROM context_embedding ce "
+        f"JOIN conversation_message m ON ce.source_message_id = m.id "
         f"{channel_filter} "
         f"ORDER BY ce.embedding <=> CAST(:vec AS vector) "
         f"LIMIT :top_k"
@@ -211,7 +211,7 @@ def _vector_search(
     try:
         rows = session.execute(sql, params).fetchall()
         return [
-            {"chunk_text": r[0], "similarity": float(r[1]), "message_id": r[2]}
+            {"chunk_text": r[0], "similarity": float(r[1]), "message_id": r[2], "role": r[3]}
             for r in rows
         ]
     except Exception as exc:
@@ -226,7 +226,7 @@ def _text_fallback_search(
     top_k: int,
 ) -> list[dict]:
     """pgvector 없을 때 최근 메시지를 반환하는 fallback 검색."""
-    query = session.query(ContextEmbedding).join(
+    query = session.query(ContextEmbedding, ConversationMessage.role).join(
         ConversationMessage,
         ContextEmbedding.source_message_id == ConversationMessage.id,
     )
@@ -239,7 +239,7 @@ def _text_fallback_search(
         .all()
     )
     return [
-        {"chunk_text": r.chunk_text, "similarity": 0.0, "message_id": r.source_message_id}
+        {"chunk_text": r[0].chunk_text, "similarity": 0.0, "message_id": r[0].source_message_id, "role": r[1]}
         for r in reversed(rows)
     ]
 

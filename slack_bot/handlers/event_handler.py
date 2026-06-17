@@ -1,4 +1,4 @@
-# Slack Bolt 이벤트 핸들러 - app_mention 및 message 이벤트 처리
+﻿# Slack Bolt 이벤트 핸들러 - app_mention 및 message 이벤트 처리
 from __future__ import annotations
 import logging
 import threading
@@ -23,7 +23,9 @@ from services.slack_service import (
     send_fallback_message,
     send_greeting_message,
     get_user_display_name,
+    fetch_thread_history,
 )
+from services.summarizer import summarize_thread_context
 from utils.image_processor import download_and_compress
 from utils.pii_filter import apply_pii_filter, has_pii
 from utils.token_counter import trim_messages_to_budget
@@ -56,16 +58,21 @@ def _is_duplicate_event(event_id: str) -> bool:
 # ---------------------------------------------------------------------------
 _QA_SYSTEM_PROMPT = (
     "너는 사내 업무 지원 Slack 챗봇이다. 정확하고 간결하게 한국어로 답변하라.\n"
+    "[참고 컨텍스트 - 과거 관련 대화] 섹션에서 [사람 답변]으로 표시된 내용을 "
+    "가장 신뢰할 수 있는 근거로 우선 참고하라.\n"
     "모르는 내용은 추측하지 말고 '확인이 필요합니다'라고 답하라.\n"
     "답변은 2~5문장 내로 핵심만 전달하라.\n"
     "AI 생성 답변임을 사용자가 인지할 수 있도록 답변 끝에 '[AI 생성 답변]'을 덧붙인다."
 )
 
 # 웹 검색 결과가 있을 때 사용하는 시스템 프롬프트.
-# [웹 검색 결과] 섹션을 근거로 답변하도록 명시적으로 안내한다.
+# 과거 대화(특히 사람 답변)를 1차 근거로, 웹 검색을 보조로 사용한다.
 _QA_SYSTEM_PROMPT_WITH_WEB = (
     "너는 사내 업무 지원 Slack 챗봇이다. 정확하고 간결하게 한국어로 답변하라.\n"
-    "[웹 검색 결과] 섹션의 내용을 근거로 답변하라. "
+    "답변 근거 우선순위: "
+    "① [과거 관련 대화]의 [사람 답변] — 실제 사람이 직접 작성한 답변으로 가장 신뢰도가 높다. "
+    "② [과거 관련 대화]의 [봇 답변] — 이전 AI 답변으로 참고할 수 있다. "
+    "③ [웹 검색 결과] — 과거 대화만으로 답하기 어려울 때만 보조로 활용하라.\n"
     "해당 결과가 질문을 직접 뒷받침하지 못할 때만 '확인이 필요합니다'라고 답하라.\n"
     "답변은 2~5문장 내로 핵심만 전달하라.\n"
     "AI 생성 답변임을 사용자가 인지할 수 있도록 답변 끝에 '[AI 생성 답변]'을 덧붙인다."
@@ -237,6 +244,7 @@ def _process_question(
     user_name: str,
     session_factory,
     thinking_ts: Optional[str] = None,
+    thread_summary: Optional[str] = None,
 ) -> None:
     """
     LLM으로 질문에 답변을 생성하고 Slack에 전송한다.
@@ -249,6 +257,7 @@ def _process_question(
             session=session,
             question=question,
             channel_id=channel_id,
+            thread_summary=thread_summary,
         )
         context_text = format_context_for_prompt(contexts)
 
@@ -265,14 +274,22 @@ def _process_question(
             for m in recent_msgs
         )
 
-        # 3. 웹 검색 (이미지 분석 포함 질문 또는 에러 로그 질문에 한해 실행)
-        web_search_text = search_web(question)
-        web_search_block = format_web_search_for_prompt(web_search_text)
+        # 3. 캐시 유사도 확인하여 웹 검색 스킵 여부 결정
+        highest_similarity = max((c.get("similarity", 0.0) for c in contexts), default=0.0)
+        web_search_block = ""
+        
+        if highest_similarity >= 0.90:
+            logger.info(f"유사도 최상({highest_similarity:.2f}) 컨텍스트 발견, 웹 검색 생략")
+        else:
+            # 3-1. 웹 검색 (이미지 분석 포함 질문 또는 에러 로그 질문에 한해 실행)
+            web_search_text = search_web(question)
+            web_search_block = format_web_search_for_prompt(web_search_text)
 
         # 4. QA 프롬프트 구성 (웹 검색 결과는 RAG 컨텍스트 뒤에 배치)
         system_prompt = _QA_SYSTEM_PROMPT_WITH_WEB if web_search_block else _QA_SYSTEM_PROMPT
         user_message_content = (
             f"[참고 컨텍스트 - 과거 관련 대화]\n{context_text}\n\n"
+            + (f"[스레드 이전 문맥 요약]\n{thread_summary}\n\n" if thread_summary else "")
             + (f"{web_search_block}\n\n" if web_search_block else "")
             + f"[최근 대화 이력]\n{recent_text or '(없음)'}\n\n"
             f"[현재 질문]\n작성자: {user_name}\n내용: {question}"
@@ -463,6 +480,14 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
                 is_question=True,
             )
 
+            # 스레드 문맥 조회 및 요약
+            thread_summary = None
+            if thread_ts:
+                thread_msgs = fetch_thread_history(client, channel_id, thread_ts, limit=20)
+                # 현재 메시지는 스레드 요약에서 제외 (마지막 메시지 제외)
+                if thread_msgs and len(thread_msgs) > 1:
+                    thread_summary = summarize_thread_context(thread_msgs[:-1])
+
             _process_question(
                 client=client,
                 channel_id=channel_id,
@@ -473,6 +498,7 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
                 user_name=user_name,
                 session_factory=session_factory,
                 thinking_ts=thinking_ts,
+                thread_summary=thread_summary,
             )
 
         threading.Thread(target=worker, daemon=True).start()
@@ -574,6 +600,13 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
                 client=client, channel=channel_id, thread_ts=thread_ts or message_ts
             )
 
+            # 스레드 문맥 조회 및 요약
+            thread_summary = None
+            if thread_ts:
+                thread_msgs = fetch_thread_history(client, channel_id, thread_ts, limit=20)
+                if thread_msgs and len(thread_msgs) > 1:
+                    thread_summary = summarize_thread_context(thread_msgs[:-1])
+
             _process_question(
                 client=client,
                 channel_id=channel_id,
@@ -584,6 +617,7 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
                 user_name=user_name,
                 session_factory=session_factory,
                 thinking_ts=thinking_ts,
+                thread_summary=thread_summary,
             )
 
         threading.Thread(target=worker, daemon=True).start()
