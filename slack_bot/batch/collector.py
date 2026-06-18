@@ -9,9 +9,8 @@ from typing import Optional
 from slack_sdk import WebClient
 
 import config
-from db.repository import upsert_message
+from db.repository import upsert_message, save_embedding, get_last_message_ts
 from services.context_retriever import embed_text
-from db.repository import save_embedding
 from utils.image_processor import analyze_slack_files
 from utils.pii_filter import apply_pii_filter
 
@@ -60,12 +59,24 @@ def backfill_channel(
     이미 수집된 메시지는 중복 없이 건너뜀.
     수집된 신규 메시지 수를 반환한다.
     """
-    oldest_dt = datetime.utcnow() - timedelta(days=days)
-    oldest_ts = _datetime_to_slack_ts(oldest_dt)
+    # DB에 이미 수집된 메시지가 있으면 마지막 ts 이후만 가져온다 (증분 수집).
+    # 없으면 최근 N일치 전체를 가져온다 (최초 수집).
+    fallback_dt = datetime.utcnow() - timedelta(days=days)
+    session = session_factory()
+    try:
+        last_ts = get_last_message_ts(session, channel_id)
+    finally:
+        session.close()
 
-    logger.info(
-        f"백필 시작 (channel={channel_id}, 최근 {days}일, oldest={oldest_dt.strftime('%Y-%m-%d')})"
-    )
+    if last_ts:
+        # 마지막 ts와 정확히 같은 메시지는 이미 있으므로 미세하게 이후 시점부터 요청
+        oldest_ts = str(float(last_ts) + 0.000001)
+        oldest_label = f"마지막 수집 이후 (ts={last_ts})"
+    else:
+        oldest_ts = _datetime_to_slack_ts(fallback_dt)
+        oldest_label = f"최근 {days}일 (oldest={fallback_dt.strftime('%Y-%m-%d')})"
+
+    logger.info(f"백필 시작 (channel={channel_id}, 범위={oldest_label})")
 
     collected_count = 0
     cursor = None

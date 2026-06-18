@@ -497,6 +497,24 @@ def get_latest_summary(
 
 
 
+def get_last_message_ts(
+    session: Session,
+    channel_id: str,
+) -> Optional[str]:
+    """
+    채널에서 가장 최근 message_ts를 반환한다.
+    백필 시 이미 수집된 구간을 건너뛰기 위한 기준점으로 사용한다.
+    메시지가 없으면 None을 반환한다.
+    """
+    msg = (
+        session.query(ConversationMessage.message_ts)
+        .filter(ConversationMessage.channel_id == channel_id)
+        .order_by(ConversationMessage.message_ts.desc())
+        .first()
+    )
+    return msg[0] if msg else None
+
+
 def get_thread_starter_user_id(
     session: Session,
     channel_id: str,
