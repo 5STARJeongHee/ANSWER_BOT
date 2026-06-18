@@ -6,6 +6,8 @@ services:
     image: pgvector/pgvector:pg16
     container_name: slackbot_db
     restart: unless-stopped
+    ports:
+      - "5433:5432"
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-slackbot}
       POSTGRES_USER: ${POSTGRES_USER:-slackbot}

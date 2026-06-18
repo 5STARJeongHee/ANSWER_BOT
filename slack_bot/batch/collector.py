@@ -2,6 +2,7 @@
 from __future__ import annotations
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -11,6 +12,7 @@ import config
 from db.repository import upsert_message
 from services.context_retriever import embed_text
 from db.repository import save_embedding
+from utils.image_processor import analyze_slack_files
 from utils.pii_filter import apply_pii_filter
 
 logger = logging.getLogger(__name__)
@@ -19,6 +21,22 @@ logger = logging.getLogger(__name__)
 # 1.3초 간격으로 요청하여 여유 있게 처리
 _API_CALL_INTERVAL = 1.3
 _BACKFILL_DAYS = 90
+# 이미지 다운로드 병렬 워커 수 (vision은 세마포어로 직렬화됨)
+_BACKFILL_IMAGE_WORKERS = 3
+
+
+def _enrich_with_images(msg: dict, bot_token: str) -> str:
+    """메시지 텍스트에 이미지 분석 결과를 앞에 붙인 최종 내용을 반환한다."""
+    raw_text = msg.get("text", "")
+    files = msg.get("files") or []
+    if not files:
+        return raw_text
+    image_ctx = analyze_slack_files(files, bot_token)
+    if not image_ctx:
+        return raw_text
+    if raw_text.strip():
+        return f"[첨부 이미지 분석]\n{image_ctx}\n\n{raw_text}".strip()
+    return f"[첨부 이미지 분석]\n{image_ctx}"
 
 
 def _slack_ts_to_datetime(ts: str) -> datetime:
@@ -74,23 +92,44 @@ def backfill_channel(
             if not messages:
                 break
 
-            # 각 메시지 저장
+            # subtype 제외, 텍스트 또는 파일이 있는 메시지만 처리
+            valid_msgs = [
+                msg for msg in messages
+                if msg.get("subtype") not in ("bot_message", "channel_join", "channel_leave")
+                and (msg.get("text", "").strip() or msg.get("files"))
+            ]
+
+            # 이미지 다운로드를 병렬로 수행하고 vision 분석 결과를 텍스트에 붙인다.
+            # (vision 호출 자체는 세마포어로 직렬화되어 QA와 경쟁하지 않음)
+            enriched: dict[int, str] = {}
+            if valid_msgs:
+                with ThreadPoolExecutor(max_workers=_BACKFILL_IMAGE_WORKERS) as executor:
+                    future_to_idx = {
+                        executor.submit(_enrich_with_images, msg, config.SLACK_BOT_TOKEN): i
+                        for i, msg in enumerate(valid_msgs)
+                    }
+                    for future in as_completed(future_to_idx):
+                        idx = future_to_idx[future]
+                        try:
+                            enriched[idx] = future.result()
+                        except Exception as exc:
+                            logger.warning(f"메시지 이미지 분석 실패 (page={page}, idx={idx}): {exc}")
+                            enriched[idx] = valid_msgs[idx].get("text", "")
+                logger.debug(f"페이지 {page} 이미지 분석 완료 ({len(valid_msgs)}건)")
+
+            # DB 저장은 순차 처리 (세션 공유)
             session = session_factory()
             try:
-                for msg in messages:
-                    if msg.get("subtype") in ("bot_message", "channel_join", "channel_leave"):
-                        continue
-
+                for i, msg in enumerate(valid_msgs):
                     ts = msg.get("ts", "")
                     user_id = msg.get("user")
-                    raw_text = msg.get("text", "")
                     bot_id = msg.get("bot_id")
-
-                    if not raw_text or not raw_text.strip():
-                        continue
-
                     role = "bot" if bot_id else "user"
-                    clean_content = apply_pii_filter(raw_text)
+                    content = enriched.get(i, msg.get("text", ""))
+                    clean_content = apply_pii_filter(content)
+
+                    if not clean_content.strip():
+                        continue
 
                     saved = upsert_message(
                         session=session,
@@ -104,7 +143,6 @@ def backfill_channel(
                     )
 
                     if saved:
-                        # 임베딩 생성
                         embedding = embed_text(clean_content)
                         save_embedding(
                             session=session,

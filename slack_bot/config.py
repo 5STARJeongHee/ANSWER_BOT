@@ -114,6 +114,8 @@ RAG_CHUNK_MAX_CHARS: int = int(os.getenv("RAG_CHUNK_MAX_CHARS", "500"))
 RECENT_MESSAGE_COUNT: int = int(os.getenv("RECENT_MESSAGE_COUNT", "8"))
 # 임베딩 최소 문자 수 — 이보다 짧은 메시지는 RAG 노이즈 방지를 위해 임베딩 생략
 EMBED_MIN_CHARS: int = int(os.getenv("EMBED_MIN_CHARS", "15"))
+# vision 모델 동시 호출 상한 (CPU 서버에서 대화형 QA와 경쟁 방지)
+MAX_CONCURRENT_VISION: int = int(os.getenv("MAX_CONCURRENT_VISION", "1"))
 
 # --- LLM 설정 ---
 MAX_CONTEXT_TOKENS: int = int(os.getenv("MAX_CONTEXT_TOKENS", "6000"))

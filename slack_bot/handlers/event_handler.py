@@ -27,7 +27,7 @@ from services.slack_service import (
     fetch_thread_history,
 )
 from services.summarizer import summarize_thread_context
-from utils.image_processor import download_and_compress
+from utils.image_processor import analyze_slack_files
 from utils.pii_filter import apply_pii_filter, has_pii
 from utils.token_counter import trim_messages_to_budget
 
@@ -97,56 +97,9 @@ def _has_user_mention(text: str) -> bool:
     return bool(_SLACK_USER_MENTION_RE.search(text))
 
 
-_IMAGE_MIME_PREFIXES = ("image/jpeg", "image/png", "image/gif", "image/webp")
-_MAX_IMAGES = 10  # 한 메시지에서 분석할 최대 이미지 수
-
-_IMAGE_DESCRIBE_PROMPT = (
-    "이 이미지에서 텍스트를 추출해줘. "
-    "서문이나 설명 없이 오류 메시지, 예외 클래스명, 스택 트레이스 라인만 한 줄씩 나열해줘. "
-    "텍스트가 없으면 이미지에서 보이는 내용을 간결하게 한 줄로 설명해줘."
-)
-
-
-def _extract_images_b64(event: dict, bot_token: str) -> list[str]:
-    """이벤트에서 이미지 파일을 최대 _MAX_IMAGES개 다운로드해 base64 리스트로 반환한다."""
-    files = event.get("files") or []
-    results: list[str] = []
-    for f in files:
-        if len(results) >= _MAX_IMAGES:
-            break
-        mime = f.get("mimetype", "")
-        if not any(mime.startswith(p) for p in _IMAGE_MIME_PREFIXES):
-            continue
-        url = f.get("url_private_download") or f.get("url_private")
-        if not url:
-            continue
-        b64 = download_and_compress(url, bot_token)
-        if b64:
-            results.append(b64)
-    return results
-
-
 def _build_image_context(event: dict, bot_token: str) -> str:
-    """이벤트의 이미지를 모두 묶어 vision 모델에 한 번에 전달하고 결과를 반환한다."""
-    from services.llm_service import call_vision
-    images_b64 = _extract_images_b64(event, bot_token)
-    if not images_b64:
-        return ""
-    count = len(images_b64)
-    prompt = _IMAGE_DESCRIBE_PROMPT
-    if count > 1:
-        prompt = (
-            f"첨부된 이미지 {count}장을 순서대로 분석해줘. "
-            "각 이미지마다 '[이미지 N]' 레이블을 붙여 구분해줘. "
-            "서문이나 설명 없이 오류 메시지, 예외 클래스명, 스택 트레이스 라인만 한 줄씩 나열해줘. "
-            "텍스트가 없으면 해당 이미지에서 보이는 내용을 간결하게 한 줄로 설명해줘."
-        )
-    result = call_vision(images_b64, prompt)
-    if result:
-        logger.info(f"이미지 분석 완료: {count}장")
-        return result.strip()
-    logger.warning(f"이미지 분석 실패: {count}장")
-    return ""
+    """이벤트의 이미지를 분석하여 텍스트를 반환한다 (analyze_slack_files 위임)."""
+    return analyze_slack_files(event.get("files") or [], bot_token)
 
 
 _FALLBACK_TRIGGER_KEYWORDS = (
@@ -565,7 +518,7 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
             logger.debug(f"중복 메시지 이벤트 무시: event_id={event_id}")
             return
 
-        if not raw_text or not raw_text.strip():
+        if not raw_text.strip() and not event.get("files"):
             return
 
         # 봇 멘션이 포함된 메시지는 app_mention 핸들러가 처리하므로 여기서는 저장만 한다.
@@ -576,6 +529,7 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
 
         def worker():
             # 멘션 메시지: 저장만 하고 답변은 app_mention 핸들러에 위임
+            # (app_mention 핸들러가 이미지 분석 포함 처리를 담당하므로 여기서는 raw_text 저장)
             if is_mention_event:
                 _save_message_and_embed(
                     session_factory=session_factory,
@@ -589,6 +543,16 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
                     is_question=True,
                 )
                 return
+
+            # 멘션 외 모든 경로: 이미지 분석을 먼저 수행하여 RAG에 이미지 내용을 포함시킨다.
+            image_ctx = analyze_slack_files(event.get("files") or [], config.SLACK_BOT_TOKEN)
+            if image_ctx:
+                if raw_text.strip():
+                    effective_content = f"[첨부 이미지 분석]\n{image_ctx}\n\n{raw_text}".strip()
+                else:
+                    effective_content = f"[첨부 이미지 분석]\n{image_ctx}"
+            else:
+                effective_content = raw_text
 
             # 가드 1: 다른 사용자 멘션이 있고 봇 멘션이 없으면 저장만
             if _has_user_mention(raw_text) and not is_mention_event:
@@ -604,7 +568,7 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
                     message_ts=message_ts,
                     user_id=user_id,
                     role="user",
-                    content=raw_text,
+                    content=effective_content,
                     is_question=False,
                 )
                 return
@@ -631,12 +595,12 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
                         message_ts=message_ts,
                         user_id=user_id,
                         role="user",
-                        content=raw_text,
+                        content=effective_content,
                         is_question=False,
                     )
                     return
 
-            # 분류기 실행
+            # 분류기 실행 (이미지 분석 결과 제외, 원문으로 분류)
             classify_result = classify_message(
                 message=raw_text,
                 is_mention=False,
@@ -644,7 +608,7 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
                 sender_user_id=user_id,
             )
 
-            # 메시지 저장 (질문 여부 포함)
+            # 메시지 저장 (이미지 분석 포함 내용, 질문 여부 포함)
             _save_message_and_embed(
                 session_factory=session_factory,
                 event_id=event_id,
@@ -653,21 +617,13 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
                 message_ts=message_ts,
                 user_id=user_id,
                 role="user",
-                content=raw_text,
+                content=effective_content,
                 is_question=classify_result.is_actionable,
             )
 
             # 질문/요청인 경우만 답변 생성
             if not classify_result.is_actionable:
                 return
-
-            # 첨부 이미지가 있으면 압축 후 vision 모델로 분석 (최대 _MAX_IMAGES개)
-            effective_question = raw_text
-            image_context = _build_image_context(event, config.SLACK_BOT_TOKEN)
-            if image_context:
-                effective_question = (
-                    f"[첨부 이미지 분석]\n{image_context}\n\n{raw_text}".strip()
-                )
 
             user_name = get_user_display_name(client, user_id) if user_id else "익명"
             thinking_ts = post_thinking_indicator(
@@ -686,7 +642,7 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
                 channel_id=channel_id,
                 thread_ts=thread_ts or message_ts,
                 message_ts=message_ts,
-                question=effective_question,
+                question=effective_content,
                 user_id=user_id,
                 user_name=user_name,
                 session_factory=session_factory,
