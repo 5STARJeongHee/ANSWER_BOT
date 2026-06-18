@@ -1,6 +1,7 @@
-﻿# Slack Bolt 이벤트 핸들러 - app_mention 및 message 이벤트 처리
+# Slack Bolt 이벤트 핸들러 - app_mention 및 message 이벤트 처리
 from __future__ import annotations
 import logging
+import re
 import threading
 import time
 from typing import Optional
@@ -9,7 +10,7 @@ from slack_bolt import App
 
 import config
 from db.models import get_session_factory
-from db.repository import upsert_message
+from db.repository import upsert_message, get_thread_starter_user_id
 from services.classifier import classify_message, MessageCategory
 from services.context_retriever import retrieve_context, format_context_for_prompt, embed_text
 from services.llm_service import call_qa
@@ -86,6 +87,14 @@ _QA_SYSTEM_PROMPT_WITH_WEB = (
 def _clean_mention_text(text: str, bot_user_id: str) -> str:
     """@봇 멘션 텍스트에서 멘션 태그를 제거한다."""
     return text.replace(f"<@{bot_user_id}>", "").strip()
+
+
+_SLACK_USER_MENTION_RE = re.compile(r"<@[A-Z0-9]+>")
+
+
+def _has_user_mention(text: str) -> bool:
+    """메시지에 Slack 사용자 멘션(<@UXXXX>)이 포함됐는지 확인한다."""
+    return bool(_SLACK_USER_MENTION_RE.search(text))
 
 
 _IMAGE_MIME_PREFIXES = ("image/jpeg", "image/png", "image/gif", "image/webp")
@@ -580,6 +589,52 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
                     is_question=True,
                 )
                 return
+
+            # 가드 1: 다른 사용자 멘션이 있고 봇 멘션이 없으면 저장만
+            if _has_user_mention(raw_text) and not is_mention_event:
+                logger.info(
+                    f"타인 멘션 메시지 감지 — 분류 생략, 저장만 처리: "
+                    f"channel={channel_id} user={user_id} text={raw_text[:50]!r}"
+                )
+                _save_message_and_embed(
+                    session_factory=session_factory,
+                    event_id=event_id,
+                    channel_id=channel_id,
+                    thread_ts=thread_ts,
+                    message_ts=message_ts,
+                    user_id=user_id,
+                    role="user",
+                    content=raw_text,
+                    is_question=False,
+                )
+                return
+
+            # 가드 2: 스레드 원글 작성자가 아닌 사람의 답글이면 저장만
+            if thread_ts:
+                _guard_session = session_factory()
+                try:
+                    starter_id = get_thread_starter_user_id(
+                        _guard_session, channel_id, thread_ts
+                    )
+                finally:
+                    _guard_session.close()
+                if starter_id and starter_id != user_id:
+                    logger.info(
+                        f"스레드 원글 작성자({starter_id})와 다른 사용자({user_id})의 "
+                        f"답글 — 분류 생략, 저장만 처리"
+                    )
+                    _save_message_and_embed(
+                        session_factory=session_factory,
+                        event_id=event_id,
+                        channel_id=channel_id,
+                        thread_ts=thread_ts,
+                        message_ts=message_ts,
+                        user_id=user_id,
+                        role="user",
+                        content=raw_text,
+                        is_question=False,
+                    )
+                    return
 
             # 분류기 실행
             classify_result = classify_message(

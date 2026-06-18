@@ -1,4 +1,4 @@
-﻿# 데이터베이스 CRUD 함수 모음 - 모든 DB 접근은 이 모듈을 통한다
+# 데이터베이스 CRUD 함수 모음 - 모든 DB 접근은 이 모듈을 통한다
 from __future__ import annotations
 import logging
 from datetime import date, datetime
@@ -310,6 +310,19 @@ def get_latest_summary(
         .first()
     )
 
+
+
+def get_thread_starter_user_id(
+    session: Session,
+    channel_id: str,
+    thread_ts: str,
+) -> Optional[str]:
+    """스레드 원글 작성자 user_id를 반환한다. 원글이 DB에 없으면 None."""
+    msg = session.query(ConversationMessage).filter(
+        ConversationMessage.channel_id == channel_id,
+        ConversationMessage.message_ts == thread_ts,
+    ).first()
+    return msg.user_id if msg else None
 
 def has_negative_feedback(session: Session, message_id: int) -> bool:
     """
