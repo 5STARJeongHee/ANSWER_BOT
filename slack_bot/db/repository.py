@@ -515,6 +515,24 @@ def get_last_message_ts(
     return msg[0] if msg else None
 
 
+def get_oldest_message_ts(
+    session: Session,
+    channel_id: str,
+) -> Optional[str]:
+    """
+    채널에서 가장 오래된 message_ts를 반환한다.
+    백필 재실행 시 아직 수집되지 않은 과거 구간의 상한선으로 사용한다.
+    메시지가 없으면 None을 반환한다.
+    """
+    msg = (
+        session.query(ConversationMessage.message_ts)
+        .filter(ConversationMessage.channel_id == channel_id)
+        .order_by(ConversationMessage.message_ts.asc())
+        .first()
+    )
+    return msg[0] if msg else None
+
+
 def get_thread_starter_user_id(
     session: Session,
     channel_id: str,

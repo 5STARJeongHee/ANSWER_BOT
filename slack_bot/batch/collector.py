@@ -9,7 +9,7 @@ from typing import Optional
 from slack_sdk import WebClient
 
 import config
-from db.repository import upsert_message, save_embedding, get_last_message_ts
+from db.repository import upsert_message, save_embedding, get_oldest_message_ts
 from services.context_retriever import embed_text
 from utils.image_processor import analyze_slack_files
 from utils.pii_filter import apply_pii_filter
@@ -59,26 +59,42 @@ def backfill_channel(
     이미 수집된 메시지는 중복 없이 건너뜀.
     수집된 신규 메시지 수를 반환한다.
     """
-    # DB에 이미 수집된 메시지가 있으면 마지막 ts 이후만 가져온다 (증분 수집).
-    # 없으면 최근 N일치 전체를 가져온다 (최초 수집).
+    # oldest(하한)는 항상 N일 전으로 고정한다.
+    # DB에 데이터가 있으면 가장 오래된 ts를 latest(상한)로 설정해 아직 수집 안 된
+    # 과거 구간만 채운다. 중단 후 재실행해도 남은 과거 구간을 이어서 수집한다.
     fallback_dt = datetime.utcnow() - timedelta(days=days)
+    oldest_ts = _datetime_to_slack_ts(fallback_dt)
+
     session = session_factory()
     try:
-        last_ts = get_last_message_ts(session, channel_id)
+        oldest_db_ts = get_oldest_message_ts(session, channel_id)
     finally:
         session.close()
 
-    if last_ts:
-        # 마지막 ts와 정확히 같은 메시지는 이미 있으므로 미세하게 이후 시점부터 요청
-        oldest_ts = str(float(last_ts) + 0.000001)
-        oldest_label = f"마지막 수집 이후 (ts={last_ts})"
+    if oldest_db_ts and float(oldest_db_ts) <= float(oldest_ts):
+        # DB 최솟값이 이미 N일 전보다 오래됨 → 수집할 과거 구간 없음
+        logger.info(
+            f"백필 스킵 — 이미 {days}일치 모두 수집됨 (channel={channel_id}, "
+            f"db_oldest={_slack_ts_to_datetime(oldest_db_ts).strftime('%Y-%m-%d %H:%M')})"
+        )
+        return 0
+
+    if oldest_db_ts:
+        # DB에 데이터가 있으면 그 직전까지만 수집 (이미 있는 구간 스킵)
+        latest_ts: Optional[str] = str(float(oldest_db_ts) - 0.000001)
+        oldest_label = (
+            f"최근 {days}일 ~ "
+            f"{_slack_ts_to_datetime(oldest_db_ts).strftime('%Y-%m-%d %H:%M')} 이전"
+        )
     else:
-        oldest_ts = _datetime_to_slack_ts(fallback_dt)
-        oldest_label = f"최근 {days}일 (oldest={fallback_dt.strftime('%Y-%m-%d')})"
+        latest_ts = None
+        oldest_label = f"최근 {days}일 전체 (oldest={fallback_dt.strftime('%Y-%m-%d')})"
 
     logger.info(f"백필 시작 (channel={channel_id}, 범위={oldest_label})")
 
     collected_count = 0
+    fetched_total = 0   # API에서 가져온 누적 valid 메시지 수
+    dup_count = 0       # 이미 DB에 있어 스킵된 누적 수
     cursor = None
     page = 0
 
@@ -90,6 +106,8 @@ def backfill_channel(
                 "oldest": oldest_ts,
                 "limit": 200,
             }
+            if latest_ts:
+                kwargs["latest"] = latest_ts
             if cursor:
                 kwargs["cursor"] = cursor
 
@@ -129,6 +147,9 @@ def backfill_channel(
                 logger.debug(f"페이지 {page} 이미지 분석 완료 ({len(valid_msgs)}건)")
 
             # DB 저장은 순차 처리 (세션 공유)
+            fetched_total += len(valid_msgs)
+            page_new = 0
+            page_dup = 0
             session = session_factory()
             try:
                 for i, msg in enumerate(valid_msgs):
@@ -162,6 +183,10 @@ def backfill_channel(
                             embedding=embedding,
                         )
                         collected_count += 1
+                        page_new += 1
+                    else:
+                        dup_count += 1
+                        page_dup += 1
 
                 # Thread 단위 청킹: 이 페이지에 등장한 스레드 답글의 thread_ts를 수집
                 if config.ENABLE_THREAD_CHUNKING:
@@ -183,7 +208,13 @@ def backfill_channel(
                             logger.warning(f"Thread 청크 저장 실패 (ts={ts}): {exc}")
 
                 session.commit()
-                logger.debug(f"페이지 {page} 처리 완료 (누적={collected_count}건)")
+                has_next = bool(response.get("response_metadata", {}).get("next_cursor"))
+                logger.info(
+                    f"[백필 진행] 채널={channel_id} | 페이지 {page}"
+                    f" | 이번 {len(valid_msgs)}건 → 신규 {page_new}건 저장 / 중복 {page_dup}건 스킵"
+                    f" | 누적 저장 {collected_count}건 / 가져옴 {fetched_total}건"
+                    + (" | 다음 페이지 있음" if has_next else " | 마지막 페이지")
+                )
 
             except Exception as exc:
                 session.rollback()
@@ -207,7 +238,10 @@ def backfill_channel(
             # 연속 오류 방지를 위해 루프 종료
             break
 
-    logger.info(f"백필 완료 (channel={channel_id}, 신규 수집={collected_count}건)")
+    logger.info(
+        f"[백필 완료] 채널={channel_id} | 페이지 {page}개 | "
+        f"총 가져옴 {fetched_total}건 | 신규 저장 {collected_count}건 | 중복 스킵 {dup_count}건"
+    )
     return collected_count
 
 
