@@ -243,16 +243,29 @@ def build_error_blocks() -> dict:
 
 def build_greeting_blocks() -> dict:
     """
-    @봇 멘션만 하고 질문 없이 호출했을 때 표시하는 환영 메시지 블록을 반환한다.
+    @봇 멘션만 하고 질문 없이 호출했을 때 표시하는 환영·사용법 안내 블록을 반환한다.
     """
     blocks: list[dict] = [
         {
             "type": "section",
             "text": {
                 "type": "mrkdwn",
+                "text": ":wave:  *안녕하세요! 사내 Q&A 챗봇입니다.*",
+            },
+        },
+        {"type": "divider"},
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
                 "text": (
-                    ":wave:  *안녕하세요! 사내 Q&A 챗봇입니다.*\n"
-                    "업무 관련 궁금한 점을 질문해 주세요. 과거 대화를 바탕으로 답변해 드립니다."
+                    "*:bulb: 사용 방법*\n\n"
+                    "*1. 채널에서 질문*\n"
+                    "`@QNA_BOT 질문 내용`\n\n"
+                    "*2. 스레드에서 추가 질문*\n"
+                    "스레드 안에서도 `@QNA_BOT 질문 내용` 으로 멘션하세요.\n\n"
+                    "*3. 이미지 첨부*\n"
+                    "에러 화면이나 설정 캡처를 이미지로 첨부하면 텍스트를 추출·분석해 드립니다."
                 ),
             },
         },
@@ -261,13 +274,17 @@ def build_greeting_blocks() -> dict:
             "elements": [
                 {
                     "type": "mrkdwn",
-                    "text": "예시: `@챗봇 연차 신청 방법이 어떻게 되나요?`",
+                    "text": (
+                        ":robot_face:  과거 대화를 기반으로 답변합니다. "
+                        "모르는 내용은 *'확인이 필요합니다'* 라고 답변합니다. "
+                        "직접 `@QNA_BOT` 을 멘션해야만 답변합니다."
+                    ),
                 }
             ],
         },
     ]
 
     return {
-        "text": "안녕하세요! 사내 Q&A 챗봇입니다. 업무 관련 질문을 해주세요.",
+        "text": "안녕하세요! 사내 Q&A 챗봇입니다. @QNA_BOT 질문 내용 형식으로 멘션해 주세요.",
         "blocks": blocks,
     }
