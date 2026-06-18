@@ -102,24 +102,24 @@ def analyze_slack_files(files: list[dict], bot_token: str) -> str:
     if not images_b64:
         return ""
 
+    # 이미지를 1장씩 개별 호출한다.
+    # 여러 장을 묶으면 n_prompt_tokens이 4096을 초과하므로 반드시 분리한다.
+    # 세마포어는 호출마다 잡고 놓아 이미지 사이 간격에 QA 요청이 끼어들 수 있게 한다.
     count = len(images_b64)
-    if count == 1:
-        prompt = _IMAGE_DESCRIBE_PROMPT
-    else:
-        prompt = (
-            f"첨부된 이미지 {count}장을 순서대로 분석해줘. "
-            "각 이미지마다 '[이미지 N]' 레이블을 붙여 구분해줘. "
-            "서문이나 설명 없이 오류 메시지, 예외 클래스명, 스택 트레이스 라인만 한 줄씩 나열해줘. "
-            "텍스트가 없으면 해당 이미지에서 보이는 내용을 간결하게 한 줄로 설명해줘."
-        )
+    results: list[str] = []
+    for i, b64 in enumerate(images_b64, 1):
+        with _get_vision_semaphore():
+            part = call_vision([b64], _IMAGE_DESCRIBE_PROMPT)
+        if part:
+            label = f"[이미지 {i}] " if count > 1 else ""
+            results.append(f"{label}{part.strip()}")
+        else:
+            logger.warning(f"이미지 {i}/{count}장 분석 실패")
 
-    with _get_vision_semaphore():
-        result = call_vision(images_b64, prompt)
-
-    if result:
-        logger.info(f"이미지 분석 완료: {count}장")
-        return result.strip()
-    logger.warning(f"이미지 분석 실패: {count}장")
+    if results:
+        logger.info(f"이미지 분석 완료: {len(results)}/{count}장")
+        return "\n".join(results)
+    logger.warning(f"이미지 분석 전체 실패: {count}장")
     return ""
 
 

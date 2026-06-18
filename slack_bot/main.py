@@ -71,19 +71,26 @@ def main() -> None:
     logger.info("배치 스케줄러 시작 완료")
 
     # 6. 백필 실행 여부 확인 (최초 배포 시 환경변수로 트리거)
+    # 데몬 스레드로 실행하여 Socket Mode 핸들러 기동을 블로킹하지 않는다.
     import os
+    import threading
     if os.getenv("RUN_BACKFILL", "false").lower() == "true":
-        logger.info("백필 배치 실행 시작...")
         from batch.collector import run_all_channels_backfill
         from slack_sdk import WebClient
         backfill_client = WebClient(token=config.SLACK_BOT_TOKEN)
-        try:
-            run_all_channels_backfill(
-                client=backfill_client,
-                session_factory=session_factory,
-            )
-        except Exception as exc:
-            logger.error(f"백필 오류 (앱 기동은 계속): {exc}", exc_info=True)
+
+        def _run_backfill():
+            logger.info("백필 배치 실행 시작 (백그라운드 스레드)...")
+            try:
+                run_all_channels_backfill(
+                    client=backfill_client,
+                    session_factory=session_factory,
+                )
+            except Exception as exc:
+                logger.error(f"백필 오류: {exc}", exc_info=True)
+            logger.info("백필 배치 완료")
+
+        threading.Thread(target=_run_backfill, daemon=True, name="backfill").start()
 
     # 7. Socket Mode 핸들러로 앱 기동
     logger.info("Slack Socket Mode 핸들러 시작...")
