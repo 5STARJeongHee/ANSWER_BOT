@@ -45,6 +45,10 @@ SLACK_SIGNING_SECRET: str = os.getenv("SLACK_SIGNING_SECRET", "")
 _raw_channels = os.getenv("TARGET_CHANNEL_IDS", "")
 TARGET_CHANNEL_IDS: list[str] = [c.strip() for c in _raw_channels.split(",") if c.strip()]
 
+# DM(Direct Message) 수집 및 응답 활성화
+# true: 1:1 DM으로 오는 메시지도 수집하고 RAG 기반 답변 전송
+ENABLE_DM_HANDLER: bool = os.getenv("ENABLE_DM_HANDLER", "true").lower() == "true"
+
 # Fallback 담당자 목록
 _raw_fallback = os.getenv("FALLBACK_MENTION_USER_IDS", "")
 FALLBACK_MENTION_USER_IDS: list[str] = [u.strip() for u in _raw_fallback.split(",") if u.strip()]

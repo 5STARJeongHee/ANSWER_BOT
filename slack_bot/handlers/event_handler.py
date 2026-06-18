@@ -33,6 +33,9 @@ from utils.token_counter import trim_messages_to_budget
 
 logger = logging.getLogger(__name__)
 
+# _process_question의 rag_channel_id 기본값 sentinel — 미전달 시 channel_id와 동일하게 동작
+_RAG_CHANNEL_DEFAULT = object()
+
 # ---------------------------------------------------------------------------
 # 이벤트 중복 방지 (Socket Mode는 기본 2개 연결로 동일 이벤트를 두 번 전달함)
 # ---------------------------------------------------------------------------
@@ -229,18 +232,23 @@ def _process_question(
     session_factory,
     thinking_ts: Optional[str] = None,
     thread_summary: Optional[str] = None,
+    rag_channel_id=_RAG_CHANNEL_DEFAULT,
 ) -> None:
     """
     LLM으로 질문에 답변을 생성하고 Slack에 전송한다.
     threading.Thread 내에서 실행되므로 독립 세션을 사용한다.
+    rag_channel_id: RAG 검색 범위. 미전달 시 channel_id와 동일, None이면 전체 채널 검색 (DM용).
     """
+    # rag_channel_id 미전달이면 현재 채널, None이면 전체 채널 (DM에서 호출 시)
+    effective_rag_channel = channel_id if rag_channel_id is _RAG_CHANNEL_DEFAULT else rag_channel_id
+
     session = session_factory()
     try:
         # 1. RAG 컨텍스트 검색
         contexts = retrieve_context(
             session=session,
             question=question,
-            channel_id=channel_id,
+            channel_id=effective_rag_channel,
             thread_summary=thread_summary,
         )
         context_text = format_context_for_prompt(contexts)
@@ -504,9 +512,10 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
     @app.event("message")
     def handle_message(event, client, ack):
         """
-        채널 메시지 이벤트를 처리한다.
+        채널 및 DM 메시지 이벤트를 처리한다.
         - 봇 메시지, subtype 이벤트(편집/삭제)는 무시한다.
-        - 대상 채널의 메시지만 수집 및 분류한다.
+        - 채널: TARGET_CHANNEL_IDS에 포함된 채널만 처리한다.
+        - DM(channel_type=im): ENABLE_DM_HANDLER=true이면 모든 메시지를 처리한다.
         """
         ack()
 
@@ -520,13 +529,19 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
         if not channel_id:
             return
 
-        # 지정 채널만 처리
-        if config.TARGET_CHANNEL_IDS and channel_id not in config.TARGET_CHANNEL_IDS:
-            return
+        channel_type = event.get("channel_type", "")
+        is_dm = channel_type == "im"
+
+        # DM이면 ENABLE_DM_HANDLER 확인, 채널이면 TARGET_CHANNEL_IDS 필터 적용
+        if is_dm:
+            if not config.ENABLE_DM_HANDLER:
+                return
+        else:
+            if config.TARGET_CHANNEL_IDS and channel_id not in config.TARGET_CHANNEL_IDS:
+                return
 
         thread_ts = event.get("thread_ts")
         message_ts = event.get("ts", "")
-        # app_mention과 message 이벤트는 동일한 event_ts를 가지므로 prefix로 구분한다.
         event_id = "msg_" + (event.get("event_ts") or message_ts)
         user_id = event.get("user")
         raw_text = event.get("text", "")
@@ -538,15 +553,59 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
         if not raw_text.strip() and not event.get("files"):
             return
 
-        # 봇 멘션이 포함된 메시지는 app_mention 핸들러가 처리하므로 여기서는 저장만 한다.
-        # 답변 분기를 실행하면 이중 답변이 발생한다.
         is_mention_event = bot_user_id and f"<@{bot_user_id}>" in raw_text
 
-        logger.debug(f"메시지 수신: channel={channel_id} user={user_id} text={raw_text[:50]!r}")
+        logger.debug(f"메시지 수신: channel={channel_id} type={channel_type} user={user_id} text={raw_text[:50]!r}")
 
         def worker():
+            image_ctx = analyze_slack_files(event.get("files") or [], config.SLACK_BOT_TOKEN)
+            if image_ctx:
+                effective_content = (
+                    f"[첨부 이미지 분석]\n{image_ctx}\n\n{raw_text}".strip()
+                    if raw_text.strip()
+                    else f"[첨부 이미지 분석]\n{image_ctx}"
+                )
+            else:
+                effective_content = raw_text
+
+            # --- DM 전용 처리 ---
+            # DM은 멘션·분류기·스레드 작성자 체크 없이 모든 메시지를 질문으로 처리한다.
+            # RAG 검색은 전체 채널 대상으로 수행한다 (rag_channel_id=None).
+            if is_dm:
+                _save_message_and_embed(
+                    session_factory=session_factory,
+                    event_id=event_id,
+                    channel_id=channel_id,
+                    thread_ts=thread_ts,
+                    message_ts=message_ts,
+                    user_id=user_id,
+                    role="user",
+                    content=effective_content,
+                    is_question=True,
+                )
+
+                user_name = get_user_display_name(client, user_id) if user_id else "익명"
+                thinking_ts = post_thinking_indicator(
+                    client=client, channel=channel_id, thread_ts=None
+                )
+
+                _process_question(
+                    client=client,
+                    channel_id=channel_id,
+                    thread_ts=None,
+                    message_ts=message_ts,
+                    question=effective_content,
+                    user_id=user_id,
+                    user_name=user_name,
+                    session_factory=session_factory,
+                    thinking_ts=thinking_ts,
+                    rag_channel_id=None,
+                )
+                return
+
+            # --- 채널 처리 ---
+
             # 멘션 메시지: 저장만 하고 답변은 app_mention 핸들러에 위임
-            # (app_mention 핸들러가 이미지 분석 포함 처리를 담당하므로 여기서는 raw_text 저장)
             if is_mention_event:
                 _save_message_and_embed(
                     session_factory=session_factory,
@@ -560,16 +619,6 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
                     is_question=True,
                 )
                 return
-
-            # 멘션 외 모든 경로: 이미지 분석을 먼저 수행하여 RAG에 이미지 내용을 포함시킨다.
-            image_ctx = analyze_slack_files(event.get("files") or [], config.SLACK_BOT_TOKEN)
-            if image_ctx:
-                if raw_text.strip():
-                    effective_content = f"[첨부 이미지 분석]\n{image_ctx}\n\n{raw_text}".strip()
-                else:
-                    effective_content = f"[첨부 이미지 분석]\n{image_ctx}"
-            else:
-                effective_content = raw_text
 
             # 가드 1: 다른 사용자 멘션이 있고 봇 멘션이 없으면 저장만
             if _has_user_mention(raw_text) and not is_mention_event:
@@ -617,7 +666,7 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
                     )
                     return
 
-            # 분류기 실행 (이미지 분석 결과 제외, 원문으로 분류)
+            # 분류기 실행
             classify_result = classify_message(
                 message=raw_text,
                 is_mention=False,
@@ -625,7 +674,6 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
                 sender_user_id=user_id,
             )
 
-            # 메시지 저장 (이미지 분석 포함 내용, 질문 여부 포함)
             _save_message_and_embed(
                 session_factory=session_factory,
                 event_id=event_id,
@@ -638,7 +686,6 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
                 is_question=classify_result.is_actionable,
             )
 
-            # 질문/요청인 경우만 답변 생성
             if not classify_result.is_actionable:
                 return
 
@@ -647,7 +694,6 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
                 client=client, channel=channel_id, thread_ts=thread_ts or message_ts
             )
 
-            # 스레드 문맥 조회 및 요약
             thread_summary = None
             if thread_ts:
                 thread_msgs = fetch_thread_history(client, channel_id, thread_ts, limit=20)
