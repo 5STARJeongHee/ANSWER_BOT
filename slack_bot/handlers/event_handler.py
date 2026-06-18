@@ -57,7 +57,7 @@ def _is_duplicate_event(event_id: str) -> bool:
 # QA 프롬프트 상수
 # ---------------------------------------------------------------------------
 _QA_SYSTEM_PROMPT = (
-    "너는 사내 업무 지원 Slack 챗봇이다. 정확하고 간결하게 한국어로 답변하라.\n"
+    "너는 사내 업무 지원 Slack 챗봇이다. 질문이 영어로 작성된 경우 영어로, 그 외에는 한국어로 답변하라.\n"
     "[참고 컨텍스트 - 과거 관련 대화] 섹션에서 [사람 답변]으로 표시된 내용을 "
     "가장 신뢰할 수 있는 근거로 우선 참고하라.\n"
     "모르는 내용은 추측하지 말고 '확인이 필요합니다'라고 답하라.\n"
@@ -68,7 +68,7 @@ _QA_SYSTEM_PROMPT = (
 # 웹 검색 결과가 있을 때 사용하는 시스템 프롬프트.
 # 과거 대화(특히 사람 답변)를 1차 근거로, 웹 검색을 보조로 사용한다.
 _QA_SYSTEM_PROMPT_WITH_WEB = (
-    "너는 사내 업무 지원 Slack 챗봇이다. 정확하고 간결하게 한국어로 답변하라.\n"
+    "너는 사내 업무 지원 Slack 챗봇이다. 질문이 영어로 작성된 경우 영어로, 그 외에는 한국어로 답변하라.\n"
     "답변 근거 우선순위: "
     "① [과거 관련 대화]의 [사람 답변] — 실제 사람이 직접 작성한 답변으로 가장 신뢰도가 높다. "
     "② [과거 관련 대화]의 [봇 답변] — 이전 AI 답변으로 참고할 수 있다. "
@@ -214,6 +214,11 @@ def _save_message_and_embed(
         session.close()
 
     # 2단계: 임베딩 생성 후 저장 (CPU 집약 작업은 커밋 후 수행)
+    # 너무 짧은 메시지는 RAG 노이즈가 되므로 임베딩 생략
+    if len(clean_content.strip()) < config.EMBED_MIN_CHARS:
+        logger.debug(f"임베딩 생략 — 메시지 너무 짧음 ({len(clean_content)}자 < {config.EMBED_MIN_CHARS}, id={msg_id})")
+        return msg_id
+
     embedding = embed_text(clean_content)
     session2 = session_factory()
     try:

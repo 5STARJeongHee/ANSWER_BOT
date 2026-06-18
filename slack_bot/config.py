@@ -1,4 +1,4 @@
-# 환경변수 로드 및 전체 설정값 관리 모듈
+﻿# 환경변수 로드 및 전체 설정값 관리 모듈
 from __future__ import annotations
 import os
 import logging
@@ -108,10 +108,12 @@ EMBEDDING_DIM: int = int(os.getenv("EMBEDDING_DIM", "768"))
 RAG_TOP_K: int = int(os.getenv("RAG_TOP_K", "3"))
 # 유사도 임계값 — 이 값 미만의 청크는 컨텍스트에서 제외
 RAG_SIMILARITY_THRESHOLD: float = float(os.getenv("RAG_SIMILARITY_THRESHOLD", "0.55"))
-# RAG 청크 1개당 최대 문자 수
-RAG_CHUNK_MAX_CHARS: int = int(os.getenv("RAG_CHUNK_MAX_CHARS", "300"))
-# 최근 대화 포함 메시지 수
-RECENT_MESSAGE_COUNT: int = int(os.getenv("RECENT_MESSAGE_COUNT", "5"))
+# RAG 청크 1개당 최대 문자 수 (SQL DDL, 에러 로그 등 긴 텍스트 고려)
+RAG_CHUNK_MAX_CHARS: int = int(os.getenv("RAG_CHUNK_MAX_CHARS", "500"))
+# 최근 대화 포함 메시지 수 (다자 대화 컨텍스트 고려)
+RECENT_MESSAGE_COUNT: int = int(os.getenv("RECENT_MESSAGE_COUNT", "8"))
+# 임베딩 최소 문자 수 — 이보다 짧은 메시지는 RAG 노이즈 방지를 위해 임베딩 생략
+EMBED_MIN_CHARS: int = int(os.getenv("EMBED_MIN_CHARS", "30"))
 
 # --- LLM 설정 ---
 MAX_CONTEXT_TOKENS: int = int(os.getenv("MAX_CONTEXT_TOKENS", "6000"))

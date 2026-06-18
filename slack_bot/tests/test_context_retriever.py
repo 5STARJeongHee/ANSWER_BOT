@@ -1,4 +1,4 @@
-# context_retriever 서비스 단위 테스트 - RAG 검색 및 임베딩 로직
+﻿# context_retriever 서비스 단위 테스트 - RAG 검색 및 임베딩 로직
 import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -42,13 +42,15 @@ class TestEmbedText:
 
     def test_valid_text_returns_vector(self):
         mock_model = MagicMock()
-        mock_model.encode.return_value = MagicMock(tolist=lambda: [0.1, 0.2, 0.3])
+        mock_vector = MagicMock()
+        mock_vector.tolist.return_value = [0.1, 0.2, 0.3]
+        mock_model.embed.return_value = [mock_vector]
 
         with patch.object(retriever_module, "_get_embedding_model", return_value=mock_model):
             result = embed_text("안녕하세요")
 
         assert result == [0.1, 0.2, 0.3]
-        mock_model.encode.assert_called_once_with("안녕하세요", normalize_embeddings=True)
+        mock_model.embed.assert_called_once_with(["안녕하세요"])
 
     def test_embedding_model_exception_returns_none(self):
         mock_model = MagicMock()
