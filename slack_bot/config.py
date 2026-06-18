@@ -112,6 +112,8 @@ EMBEDDING_DIM: int = int(os.getenv("EMBEDDING_DIM", "768"))
 RAG_TOP_K: int = int(os.getenv("RAG_TOP_K", "3"))
 # 유사도 임계값 — 이 값 미만의 청크는 컨텍스트에서 제외
 RAG_SIMILARITY_THRESHOLD: float = float(os.getenv("RAG_SIMILARITY_THRESHOLD", "0.55"))
+# 이미지 포함 질문에 적용하는 낮은 유사도 임계값 (쿼리 변환 손실 보완)
+RAG_IMAGE_SIMILARITY_THRESHOLD: float = float(os.getenv("RAG_IMAGE_SIMILARITY_THRESHOLD", "0.45"))
 # RAG 청크 1개당 최대 문자 수 (SQL DDL, 에러 로그 등 긴 텍스트 고려)
 RAG_CHUNK_MAX_CHARS: int = int(os.getenv("RAG_CHUNK_MAX_CHARS", "500"))
 # 최근 대화 포함 메시지 수 (다자 대화 컨텍스트 고려)

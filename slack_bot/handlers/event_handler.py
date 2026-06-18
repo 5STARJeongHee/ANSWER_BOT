@@ -233,6 +233,7 @@ def _process_question(
     thinking_ts: Optional[str] = None,
     thread_summary: Optional[str] = None,
     rag_channel_id=_RAG_CHANNEL_DEFAULT,
+    image_context: Optional[str] = None,
 ) -> None:
     """
     LLM으로 질문에 답변을 생성하고 Slack에 전송한다.
@@ -250,6 +251,7 @@ def _process_question(
             question=question,
             channel_id=effective_rag_channel,
             thread_summary=thread_summary,
+            image_context=image_context,
         )
         context_text = format_context_for_prompt(contexts)
 
@@ -505,6 +507,7 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
                 session_factory=session_factory,
                 thinking_ts=thinking_ts,
                 thread_summary=thread_summary,
+                image_context=image_context or None,
             )
 
         threading.Thread(target=worker, daemon=True).start()
@@ -600,6 +603,7 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
                     session_factory=session_factory,
                     thinking_ts=thinking_ts,
                     rag_channel_id=None,
+                    image_context=image_ctx or None,
                 )
                 return
 
@@ -711,6 +715,7 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
                 session_factory=session_factory,
                 thinking_ts=thinking_ts,
                 thread_summary=thread_summary,
+                image_context=image_ctx or None,
             )
 
         threading.Thread(target=worker, daemon=True).start()

@@ -108,14 +108,22 @@ def retrieve_context(
     channel_id: Optional[str] = None,
     top_k: int = None,
     thread_summary: Optional[str] = None,
+    image_context: Optional[str] = None,
 ) -> list[dict]:
     """
     질문과 유사한 과거 대화 청크를 검색하여 반환한다.
     ENABLE_RERANKING=true이면 pool_k 후보를 가져온 뒤 Cross-Encoder로 재정렬 후 top_k를 반환한다.
+    image_context가 있으면 이미지 추출 텍스트로 추가 검색하고 결과를 병합한다.
     반환 형식: [{"chunk_text": str, "similarity": float, "message_id": int, "role": str, "chunk_type": str}]
     """
     if top_k is None:
         top_k = config.RAG_TOP_K
+
+    # 이미지 포함 질문이면 쿼리 변환 손실을 감안해 낮은 임계값 적용
+    similarity_threshold = (
+        config.RAG_IMAGE_SIMILARITY_THRESHOLD if image_context
+        else config.RAG_SIMILARITY_THRESHOLD
+    )
 
     # Reranking 활성화 시 초기 후보를 더 많이 가져온다
     pool_k = config.RAG_RERANK_POOL_K if config.ENABLE_RERANKING else top_k
@@ -142,8 +150,26 @@ def retrieve_context(
         # 유사도 임계값 미만 청크 제거 (fallback 결과는 similarity=0.0이므로 제외 안 함)
         filtered = [
             r for r in results
-            if r["similarity"] == 0.0 or r["similarity"] >= config.RAG_SIMILARITY_THRESHOLD
+            if r["similarity"] == 0.0 or r["similarity"] >= similarity_threshold
         ]
+
+        # 3b. 이미지 텍스트로 추가 직접 검색 후 병합 (LLM 쿼리 변환 없이 원문 사용)
+        if image_context and image_context.strip():
+            image_embedding = embed_text(image_context)
+            image_results = search_similar_embeddings(
+                session=session,
+                query_embedding=image_embedding or [],
+                query_text=image_context,
+                channel_id=channel_id,
+                top_k=pool_k,
+            )
+            existing_ids = {r.get("message_id") for r in filtered}
+            for r in image_results:
+                if (r["similarity"] == 0.0 or r["similarity"] >= similarity_threshold) and (
+                    r.get("message_id") not in existing_ids
+                ):
+                    filtered.append(r)
+                    existing_ids.add(r.get("message_id"))
 
         # 4. Cross-Encoder 재정렬 후 상위 top_k 반환
         if config.ENABLE_RERANKING and len(filtered) > top_k:
@@ -154,8 +180,8 @@ def retrieve_context(
         query_preview = repr(search_query[:50])
         logger.info(
             f"RAG 검색 완료: {len(final)}건 / 후보 {len(results)}건 "
-            f"(임계값={config.RAG_SIMILARITY_THRESHOLD}, rerank={'on' if config.ENABLE_RERANKING else 'off'}, "
-            f"쿼리={query_preview})"
+            f"(임계값={similarity_threshold}, rerank={'on' if config.ENABLE_RERANKING else 'off'}, "
+            f"이미지검색={'on' if image_context else 'off'}, 쿼리={query_preview})"
         )
         return final
     except Exception as exc:
