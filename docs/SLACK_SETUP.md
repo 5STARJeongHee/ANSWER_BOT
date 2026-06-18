@@ -31,6 +31,9 @@
                 "channels:read",
                 "chat:write",
                 "files:read",
+                "im:history",
+                "im:read",
+                "im:write",
                 "reactions:write",
                 "reactions:read",
                 "users:read"
@@ -41,7 +44,8 @@
         "event_subscriptions": {
             "bot_events": [
                 "app_mention",
-                "message.channels"
+                "message.channels",
+                "message.im"
             ]
         },
         "org_deploy_enabled": false,
@@ -65,6 +69,9 @@
 | `channels:read` | 채널 정보 조회 |
 | `chat:write` | 답변 메시지 전송 |
 | `files:read` | 첨부 이미지 다운로드 (`url_private_download` 접근) |
+| `im:history` | DM 메시지 기록 읽기 (DM 핸들러용) |
+| `im:read` | DM 채널 정보 조회 |
+| `im:write` | DM으로 메시지 전송 |
 | `reactions:write` | 처리 중 이모지 반응 추가/삭제 |
 | `reactions:read` | 이모지 반응 상태 확인 |
 | `users:read` | 사용자 정보 조회 (PII 마스킹용) |
@@ -75,6 +82,7 @@
 |--------|------------|
 | `app_mention` | 채널에서 `@QNA BOT` 멘션 시 → 즉시 답변 |
 | `message.channels` | 공개 채널 메시지 전체 → 배경 컨텍스트 축적 (RAG 학습) |
+| `message.im` | 1:1 DM 메시지 → RAG 기반 자동 답변 (ENABLE_DM_HANDLER=true 필요) |
 
 ### 기타 설정
 

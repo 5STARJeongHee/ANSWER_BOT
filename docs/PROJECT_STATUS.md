@@ -1,6 +1,6 @@
 # 프로젝트 현황 — ANSWER_BOT (Slack 사내 챗봇)
 
-> 최종 업데이트: 2026-06-16
+> 최종 업데이트: 2026-06-18
 
 ---
 
@@ -11,6 +11,11 @@
 | PRD | 제품 요구사항 정의서 (`docs/PRD.md`) | ✅ 완료 |
 | 모델 선택 | OpenRouter 무료 모델 최적화 (`docs/MODEL_SELECTION.md`) | ✅ 완료 |
 | 백엔드 | Slack Bolt + OpenRouter 연동, RAG 파이프라인 | ✅ 완료 |
+| Advanced RAG | Hybrid Search + Cross-Encoder Reranking + Thread 청킹 | ✅ 완료 |
+| DM 핸들러 | 1:1 DM 수신 및 RAG 기반 자동 답변 | ✅ 완료 |
+| 이미지 분석 | Vision 모델로 첨부 이미지 분석 후 컨텍스트 포함 | ✅ 완료 |
+| 웹 검색 | DuckDuckGo 보조 검색 (RAG 컨텍스트 보완) | ✅ 완료 |
+| 증분 백필 | 마지막 수집 ts 이후만 가져와 중복 방지 | ✅ 완료 |
 | DB | Supabase 연동 (pgvector + NullPool + SSL) | ✅ 완료 |
 | UI/UX | Slack Block Kit 메시지 컴포넌트 (`slack_bot/ui/`) | ✅ 완료 |
 | 테스트 | 단위 테스트 109개 (100% PASS) | ✅ 완료 |
@@ -23,17 +28,26 @@
 ```
 Slack (Socket Mode)
       │
-      ▼
+      ├── 채널 메시지 / @멘션
+      └── DM 메시지 (ENABLE_DM_HANDLER=true)
+            │
+            ▼
 event_handler.py   ← 이벤트 수신, 3초 ack 후 스레드 처리
       │
       ├─► classifier.py        ← 메시지 분류 (question/request/chitchat)
-      ├─► context_retriever.py ← pgvector RAG 검색 (Supabase)
-      ├─► llm_service.py       ← OpenRouter API 호출 (폴백 체인)
+      ├─► image_processor.py   ← Vision 모델 이미지 분석
+      ├─► context_retriever.py ← Advanced RAG (Hybrid Search + Reranking + Thread 청킹)
+      ├─► web_search.py        ← DuckDuckGo 보조 검색 (RAG 부족 시)
+      ├─► summarizer.py        ← 스레드 문맥 요약
+      ├─► llm_service.py       ← OpenRouter/Ollama API 호출 (폴백 체인)
       └─► slack_service.py     ← Block Kit 응답 전송
               │
               ▼
         ui/message_blocks.py   ← Block Kit 컴포넌트
-        ui/reaction_handler.py ← 이모지 반응 처리
+        ui/reaction_handler.py ← 이모지 반응 / 피드백 처리
+
+batch/collector.py  ← 증분 백필 (마지막 수집 ts 이후분만 수집)
+batch/scheduler.py  ← APScheduler 주간 요약 배치
 ```
 
 ---
@@ -44,10 +58,12 @@ event_handler.py   ← 이벤트 수신, 3초 ack 후 스레드 처리
 |------|------|
 | 언어 | Python 3.11+ |
 | Slack SDK | slack-bolt (Socket Mode — HTTPS 엔드포인트 불필요) |
-| LLM | OpenRouter API (무료 모델 전용) |
+| LLM | OpenRouter API (무료 모델) 또는 로컬 Ollama (`LLM_BACKEND` 선택) |
 | DB | Supabase (PostgreSQL + pgvector) |
 | ORM | SQLAlchemy 2.0 (NullPool) |
-| 임베딩 | sentence-transformers (로컬, paraphrase-multilingual-mpnet-base-v2) |
+| 임베딩 | fastembed (ONNX, paraphrase-multilingual-mpnet-base-v2, ~400MB) |
+| Reranking | fastembed TextCrossEncoder (BAAI/bge-reranker-base) |
+| 웹 검색 | duckduckgo-search (API 키 불필요) |
 | 스케줄러 | APScheduler (주간 배치 요약) |
 | 테스트 | pytest |
 
@@ -133,32 +149,39 @@ conda run -n slack_bot --cwd D:\My\SLACK_BOT\slack_bot python main.py
 SLACK_BOT/
 ├── .env                           ← 실제 시크릿 (gitignore됨)
 ├── .env.example                   ← 템플릿
-├── properties.txt                 ← LLM 모델 설정
+├── properties.yml                 ← LLM 모델 설정 (YAML)
 ├── docs/
 │   ├── PRD.md
 │   ├── MODEL_SELECTION.md
 │   ├── BACKEND_ARCHITECTURE.md
 │   ├── UI_UX_DESIGN.md
 │   ├── SUPABASE_SETUP.md
+│   ├── SLACK_SETUP.md
 │   ├── QA_REPORT.md
 │   └── PROJECT_STATUS.md
 └── slack_bot/
     ├── main.py
     ├── config.py
-    ├── handlers/event_handler.py
+    ├── handlers/event_handler.py  ← 채널/DM/멘션 이벤트 통합 처리
     ├── services/
     │   ├── classifier.py
     │   ├── llm_service.py
-    │   ├── context_retriever.py
+    │   ├── context_retriever.py   ← Advanced RAG (Hybrid+Rerank+Thread)
     │   ├── slack_service.py
-    │   └── summarizer.py
+    │   ├── summarizer.py
+    │   └── web_search.py          ← DuckDuckGo 보조 검색
     ├── ui/
     │   ├── message_blocks.py
     │   └── reaction_handler.py
     ├── db/
     │   ├── models.py
+    │   ├── repository.py
     │   └── migrations/001_initial_schema.sql
+    ├── batch/
+    │   ├── collector.py           ← 증분 백필
+    │   └── scheduler.py
     ├── utils/
+    │   ├── image_processor.py     ← Vision 모델 이미지 분석
     │   ├── pii_filter.py
     │   └── token_counter.py
     └── tests/
@@ -168,5 +191,6 @@ SLACK_BOT/
         ├── test_context_retriever.py
         ├── test_event_handler.py
         ├── test_pii_filter.py
-        └── test_token_counter.py
+        ├── test_token_counter.py
+        └── test_web_search.py
 ```
