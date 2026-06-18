@@ -1,6 +1,6 @@
 # 프로젝트 현황 — ANSWER_BOT (Slack 사내 챗봇)
 
-> 최종 업데이트: 2026-06-18
+> 최종 업데이트: 2026-06-18 (2차)
 
 ---
 
@@ -15,7 +15,10 @@
 | DM 핸들러 | 1:1 DM 수신 및 RAG 기반 자동 답변 | ✅ 완료 |
 | 이미지 분석 | Vision 모델로 첨부 이미지 분석 후 컨텍스트 포함 | ✅ 완료 |
 | 웹 검색 | DuckDuckGo 보조 검색 (RAG 컨텍스트 보완) | ✅ 완료 |
-| 증분 백필 | 마지막 수집 ts 이후만 가져와 중복 방지 | ✅ 완료 |
+| 증분 백필 | DB 최솟값 ts 기준 미수집 과거 구간만 채움, 중단 후 재개 지원 | ✅ 완료 |
+| 백필 백그라운드 실행 | 백필 중에도 Slack 이벤트 정상 수신 (데몬 스레드) | ✅ 완료 |
+| 이미지 1장씩 개별 분석 | context size 초과 방지, QA 요청 사이 끼어들기 허용 | ✅ 완료 |
+| 백필 진행도 로그 | 페이지별 신규/중복/누적 건수 INFO 로그 | ✅ 완료 |
 | DB | Supabase 연동 (pgvector + NullPool + SSL) | ✅ 완료 |
 | UI/UX | Slack Block Kit 메시지 컴포넌트 (`slack_bot/ui/`) | ✅ 완료 |
 | 테스트 | 단위 테스트 109개 (100% PASS) | ✅ 완료 |
@@ -46,7 +49,8 @@ event_handler.py   ← 이벤트 수신, 3초 ack 후 스레드 처리
         ui/message_blocks.py   ← Block Kit 컴포넌트
         ui/reaction_handler.py ← 이모지 반응 / 피드백 처리
 
-batch/collector.py  ← 증분 백필 (마지막 수집 ts 이후분만 수집)
+batch/collector.py  ← 증분 백필 (DB 최솟값 ts 기준 미수집 과거 구간 채움,
+                        중단 후 재시작 시 끊긴 곳부터 재개, 데몬 스레드로 실행)
 batch/scheduler.py  ← APScheduler 주간 요약 배치
 ```
 
