@@ -152,6 +152,25 @@ def backfill_channel(
                         )
                         collected_count += 1
 
+                # Thread 단위 청킹: 이 페이지에 등장한 스레드 답글의 thread_ts를 수집
+                if config.ENABLE_THREAD_CHUNKING:
+                    from db.repository import save_thread_chunk_embedding
+                    thread_tss = {
+                        msg.get("thread_ts")
+                        for msg in valid_msgs
+                        if msg.get("thread_ts") and msg.get("thread_ts") != msg.get("ts")
+                    }
+                    for ts in thread_tss:
+                        try:
+                            save_thread_chunk_embedding(
+                                session=session,
+                                channel_id=channel_id,
+                                thread_ts=ts,
+                                embed_fn=embed_text,
+                            )
+                        except Exception as exc:
+                            logger.warning(f"Thread 청크 저장 실패 (ts={ts}): {exc}")
+
                 session.commit()
                 logger.debug(f"페이지 {page} 처리 완료 (누적={collected_count}건)")
 

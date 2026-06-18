@@ -130,6 +130,7 @@ def save_embedding(
     source_message_id: int,
     chunk_text: str,
     embedding: Optional[list[float]] = None,
+    chunk_type: str = "message",
 ) -> ContextEmbedding:
     """임베딩을 저장한다. pgvector 비활성 시 JSON 직렬화로 저장한다."""
     import json
@@ -137,6 +138,7 @@ def save_embedding(
     emb = ContextEmbedding(
         source_message_id=source_message_id,
         chunk_text=chunk_text,
+        chunk_type=chunk_type,
         embedding_json=json.dumps(embedding) if embedding else None,
     )
     session.add(emb)
@@ -167,14 +169,18 @@ def save_embedding(
 def search_similar_embeddings(
     session: Session,
     query_embedding: list[float],
+    query_text: str = "",
     channel_id: Optional[str] = None,
     top_k: int = 5,
 ) -> list[dict]:
     """
     쿼리 임베딩과 가장 유사한 청크를 반환한다.
-    pgvector 비활성 시 최근 메시지 full-text 검색으로 fallback한다.
+    ENABLE_HYBRID_SEARCH=true이면 pg_trgm + pgvector RRF 검색,
+    false이면 순수 벡터 검색, pgvector 비활성 시 텍스트 fallback.
     """
     if config.ENABLE_VECTOR_SEARCH and query_embedding:
+        if config.ENABLE_HYBRID_SEARCH and query_text:
+            return _hybrid_search(session, query_embedding, query_text, channel_id, top_k)
         return _vector_search(session, query_embedding, channel_id, top_k)
     else:
         return _text_fallback_search(session, channel_id, top_k)
@@ -189,7 +195,6 @@ def _vector_search(
     """pgvector 코사인 유사도 검색."""
     vec_str = "[" + ",".join(str(v) for v in query_embedding) + "]"
 
-    # role 포함을 위해 항상 conversation_message JOIN
     channel_filter = ""
     params: dict = {"vec": vec_str, "top_k": top_k}
     if channel_id:
@@ -200,8 +205,7 @@ def _vector_search(
     sql = text(
         f"SELECT ce.chunk_text, "
         f"1 - (ce.embedding <=> CAST(:vec AS vector)) AS similarity, "
-        f"ce.source_message_id, "
-        f"m.role "
+        f"ce.source_message_id, m.role, ce.chunk_type "
         f"FROM context_embedding ce "
         f"JOIN conversation_message m ON ce.source_message_id = m.id "
         f"{channel_filter} "
@@ -211,13 +215,109 @@ def _vector_search(
     try:
         rows = session.execute(sql, params).fetchall()
         return [
-            {"chunk_text": r[0], "similarity": float(r[1]), "message_id": r[2], "role": r[3]}
+            {
+                "chunk_text": r[0],
+                "similarity": float(r[1]),
+                "message_id": r[2],
+                "role": r[3],
+                "chunk_type": r[4] or "message",
+            }
             for r in rows
         ]
     except Exception as exc:
         logger.warning(f"pgvector 검색 실패, fallback: {exc}")
         session.rollback()
         return _text_fallback_search(session, channel_id, top_k)
+
+
+def _hybrid_search(
+    session: Session,
+    query_embedding: list[float],
+    query_text: str,
+    channel_id: Optional[str],
+    top_k: int,
+) -> list[dict]:
+    """
+    pg_trgm(trigram 키워드) + pgvector(코사인) 검색을 RRF로 통합한다.
+    언어 무관 trigram은 에러코드·한글 모두 처리한다.
+    pg_trgm 미설치 또는 오류 시 순수 벡터 검색으로 fallback한다.
+    """
+    vec_str = "[" + ",".join(str(v) for v in query_embedding) + "]"
+    pool = max(top_k * 4, 20)  # 각 검색에서 가져올 후보 수
+    rrf_k = 60  # RRF 표준 상수
+
+    channel_where = ""
+    params: dict = {"vec": vec_str, "query_text": query_text, "pool": pool, "top_k": top_k}
+    if channel_id:
+        channel_where = "AND m.channel_id = :channel_id"
+        params["channel_id"] = channel_id
+
+    sql = text(f"""
+        WITH vector_ranked AS (
+            SELECT ce.id,
+                   ce.chunk_text,
+                   ce.source_message_id,
+                   m.role,
+                   ce.chunk_type,
+                   1 - (ce.embedding <=> CAST(:vec AS vector)) AS vec_sim,
+                   ROW_NUMBER() OVER (ORDER BY ce.embedding <=> CAST(:vec AS vector)) AS vec_rank
+            FROM context_embedding ce
+            JOIN conversation_message m ON ce.source_message_id = m.id
+            WHERE ce.embedding IS NOT NULL
+            {channel_where}
+            ORDER BY ce.embedding <=> CAST(:vec AS vector)
+            LIMIT :pool
+        ),
+        trgm_ranked AS (
+            SELECT ce.id,
+                   ce.chunk_text,
+                   ce.source_message_id,
+                   m.role,
+                   ce.chunk_type,
+                   word_similarity(:query_text, ce.chunk_text) AS trgm_sim,
+                   ROW_NUMBER() OVER (
+                       ORDER BY word_similarity(:query_text, ce.chunk_text) DESC
+                   ) AS trgm_rank
+            FROM context_embedding ce
+            JOIN conversation_message m ON ce.source_message_id = m.id
+            WHERE word_similarity(:query_text, ce.chunk_text) > 0.1
+            {channel_where}
+            ORDER BY trgm_sim DESC
+            LIMIT :pool
+        ),
+        merged AS (
+            SELECT
+                COALESCE(v.id, t.id) AS id,
+                COALESCE(v.chunk_text, t.chunk_text) AS chunk_text,
+                COALESCE(v.source_message_id, t.source_message_id) AS source_message_id,
+                COALESCE(v.role, t.role) AS role,
+                COALESCE(v.chunk_type, t.chunk_type) AS chunk_type,
+                COALESCE(1.0 / ({rrf_k} + v.vec_rank), 0.0)
+                    + COALESCE(1.0 / ({rrf_k} + t.trgm_rank), 0.0) AS rrf_score
+            FROM vector_ranked v
+            FULL OUTER JOIN trgm_ranked t ON v.id = t.id
+        )
+        SELECT chunk_text, rrf_score, source_message_id, role, chunk_type
+        FROM merged
+        ORDER BY rrf_score DESC
+        LIMIT :top_k
+    """)
+    try:
+        rows = session.execute(sql, params).fetchall()
+        return [
+            {
+                "chunk_text": r[0],
+                "similarity": float(r[1]),
+                "message_id": r[2],
+                "role": r[3],
+                "chunk_type": r[4] or "message",
+            }
+            for r in rows
+        ]
+    except Exception as exc:
+        logger.warning(f"Hybrid 검색 실패, 벡터 검색으로 fallback: {exc}")
+        session.rollback()
+        return _vector_search(session, query_embedding, channel_id, top_k)
 
 
 def _text_fallback_search(
@@ -239,9 +339,94 @@ def _text_fallback_search(
         .all()
     )
     return [
-        {"chunk_text": r[0].chunk_text, "similarity": 0.0, "message_id": r[0].source_message_id, "role": r[1]}
+        {
+            "chunk_text": r[0].chunk_text,
+            "similarity": 0.0,
+            "message_id": r[0].source_message_id,
+            "role": r[1],
+            "chunk_type": r[0].chunk_type or "message",
+        }
         for r in reversed(rows)
     ]
+
+
+def save_thread_chunk_embedding(
+    session: Session,
+    *,
+    channel_id: str,
+    thread_ts: str,
+    embed_fn,
+) -> Optional[ContextEmbedding]:
+    """
+    스레드 내 모든 메시지를 Q:/A: 형식으로 합쳐 하나의 thread 청크로 임베딩한다.
+    source_message_id는 스레드 첫 메시지 ID를 사용하며, 기존 thread 청크가 있으면 갱신한다.
+    단일 메시지 스레드(2개 미만)는 처리하지 않는다.
+    """
+    import json
+
+    msgs = (
+        session.query(ConversationMessage)
+        .filter(
+            ConversationMessage.channel_id == channel_id,
+            ConversationMessage.thread_ts == thread_ts,
+        )
+        .order_by(ConversationMessage.created_at.asc())
+        .all()
+    )
+    if not msgs or len(msgs) < 2:
+        return None
+
+    parts = []
+    for msg in msgs:
+        prefix = "Q:" if msg.role == "user" else "A:"
+        parts.append(f"{prefix} {msg.content.strip()}")
+    chunk_text = "\n".join(parts)
+
+    if len(chunk_text) > config.THREAD_CHUNK_MAX_CHARS:
+        chunk_text = chunk_text[:config.THREAD_CHUNK_MAX_CHARS]
+
+    first_msg = msgs[0]
+
+    # 기존 thread 청크가 있으면 내용만 갱신한다
+    existing = (
+        session.query(ContextEmbedding)
+        .filter(
+            ContextEmbedding.source_message_id == first_msg.id,
+            ContextEmbedding.chunk_type == "thread",
+        )
+        .first()
+    )
+
+    embedding = embed_fn(chunk_text)
+
+    if existing:
+        existing.chunk_text = chunk_text
+        if embedding:
+            existing.embedding_json = json.dumps(embedding)
+            if config.ENABLE_VECTOR_SEARCH:
+                vec_str = "[" + ",".join(str(v) for v in embedding) + "]"
+                try:
+                    session.execute(text("SAVEPOINT thread_chunk_vec"))
+                    session.execute(
+                        text(
+                            "UPDATE context_embedding SET embedding = CAST(:vec AS vector) "
+                            "WHERE id = :id"
+                        ),
+                        {"vec": vec_str, "id": existing.id},
+                    )
+                    session.execute(text("RELEASE SAVEPOINT thread_chunk_vec"))
+                except Exception:
+                    session.execute(text("ROLLBACK TO SAVEPOINT thread_chunk_vec"))
+        session.flush()
+        return existing
+
+    return save_embedding(
+        session=session,
+        source_message_id=first_msg.id,
+        chunk_text=chunk_text,
+        embedding=embedding,
+        chunk_type="thread",
+    )
 
 
 # ---------------------------------------------------------------------------

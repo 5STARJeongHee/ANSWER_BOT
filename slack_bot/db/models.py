@@ -70,6 +70,8 @@ class ContextEmbedding(Base):
         index=True,
     )
     chunk_text = Column(Text, nullable=False)
+    # 'message': 단일 메시지 청크 (기본값) / 'thread': 스레드 전체 통합 청크
+    chunk_type = Column(String(20), nullable=True)
     # pgvector 컬럼: ENABLE_VECTOR_SEARCH=true 일 때만 사용
     # 타입은 마이그레이션 SQL에서 직접 지정 (sqlalchemy-pgvector 또는 Raw DDL)
     embedding_json = Column(Text, nullable=True)  # fallback: JSON 직렬화 벡터
@@ -213,6 +215,16 @@ def init_db(engine=None) -> None:
     # 테이블 먼저 생성한 뒤 ALTER TABLE을 실행해야 한다.
     Base.metadata.create_all(engine)
 
+    with engine.connect() as conn:
+        try:
+            # chunk_type 컬럼 추가 (기존 레코드는 NULL = 'message'로 취급)
+            conn.execute(
+                text("ALTER TABLE context_embedding ADD COLUMN IF NOT EXISTS chunk_type VARCHAR(20);")
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+
     if config.ENABLE_VECTOR_SEARCH:
         with engine.connect() as conn:
             try:
@@ -227,6 +239,21 @@ def init_db(engine=None) -> None:
                         "CREATE INDEX IF NOT EXISTS ix_context_embedding_vector "
                         "ON context_embedding USING ivfflat (embedding vector_cosine_ops) "
                         "WITH (lists = 100);"
+                    )
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+
+    if config.ENABLE_HYBRID_SEARCH:
+        with engine.connect() as conn:
+            try:
+                # pg_trgm 확장 (언어 무관 키워드 검색 — 에러코드·한글 모두 지원)
+                conn.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm;"))
+                conn.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_context_embedding_trgm "
+                        "ON context_embedding USING gin (chunk_text gin_trgm_ops);"
                     )
                 )
                 conn.commit()

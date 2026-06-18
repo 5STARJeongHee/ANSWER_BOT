@@ -194,9 +194,26 @@ def _save_message_and_embed(
     except Exception as exc:
         session2.rollback()
         logger.warning(f"임베딩 저장 실패 (message_id={msg_id}): {exc}", exc_info=True)
-        # 임베딩 실패는 메시지 저장 성공에 영향을 주지 않는다.
     finally:
         session2.close()
+
+    # 3단계: thread 청크 갱신 (스레드 메시지이고 ENABLE_THREAD_CHUNKING이면)
+    if thread_ts and config.ENABLE_THREAD_CHUNKING:
+        from db.repository import save_thread_chunk_embedding
+        session3 = session_factory()
+        try:
+            save_thread_chunk_embedding(
+                session=session3,
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+                embed_fn=embed_text,
+            )
+            session3.commit()
+        except Exception as exc:
+            session3.rollback()
+            logger.warning(f"Thread 청크 저장 실패 (thread_ts={thread_ts}): {exc}", exc_info=True)
+        finally:
+            session3.close()
 
     return msg_id
 

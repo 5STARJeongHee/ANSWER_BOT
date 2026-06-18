@@ -104,7 +104,7 @@ ENABLE_VECTOR_SEARCH: bool = os.getenv("ENABLE_VECTOR_SEARCH", "true").lower() =
 EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "sentence-transformers/paraphrase-multilingual-mpnet-base-v2")
 EMBEDDING_DIM: int = int(os.getenv("EMBEDDING_DIM", "768"))
 
-# RAG 검색 상위 K개
+# RAG 검색 최종 반환 K개
 RAG_TOP_K: int = int(os.getenv("RAG_TOP_K", "3"))
 # 유사도 임계값 — 이 값 미만의 청크는 컨텍스트에서 제외
 RAG_SIMILARITY_THRESHOLD: float = float(os.getenv("RAG_SIMILARITY_THRESHOLD", "0.55"))
@@ -116,6 +116,24 @@ RECENT_MESSAGE_COUNT: int = int(os.getenv("RECENT_MESSAGE_COUNT", "8"))
 EMBED_MIN_CHARS: int = int(os.getenv("EMBED_MIN_CHARS", "15"))
 # vision 모델 동시 호출 상한 (CPU 서버에서 대화형 QA와 경쟁 방지)
 MAX_CONCURRENT_VISION: int = int(os.getenv("MAX_CONCURRENT_VISION", "1"))
+
+# --- Hybrid Search 설정 (pg_trgm + pgvector RRF) ---
+# true: 키워드(trigram) + 벡터 검색 결합 / false: 순수 벡터 검색
+ENABLE_HYBRID_SEARCH: bool = os.getenv("ENABLE_HYBRID_SEARCH", "true").lower() == "true"
+
+# --- Reranking 설정 (Cross-Encoder 재정렬) ---
+# true: RAG_RERANK_POOL_K 후보를 가져온 뒤 Cross-Encoder로 재정렬 후 RAG_TOP_K 반환
+ENABLE_RERANKING: bool = os.getenv("ENABLE_RERANKING", "true").lower() == "true"
+# fastembed TextCrossEncoder 모델 (한중영 multilingual 지원)
+RERANK_MODEL: str = os.getenv("RERANK_MODEL", "BAAI/bge-reranker-base")
+# Reranker에 전달할 초기 후보 수
+RAG_RERANK_POOL_K: int = int(os.getenv("RAG_RERANK_POOL_K", "15"))
+
+# --- Thread 청킹 설정 (스레드 단위 통합 임베딩) ---
+# true: 스레드 내 메시지 전체를 하나의 청크로 추가 임베딩
+ENABLE_THREAD_CHUNKING: bool = os.getenv("ENABLE_THREAD_CHUNKING", "true").lower() == "true"
+# thread 청크 최대 문자 수 (Q&A 흐름 보존 우선)
+THREAD_CHUNK_MAX_CHARS: int = int(os.getenv("THREAD_CHUNK_MAX_CHARS", "1500"))
 
 # --- LLM 설정 ---
 MAX_CONTEXT_TOKENS: int = int(os.getenv("MAX_CONTEXT_TOKENS", "6000"))
