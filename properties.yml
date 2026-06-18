@@ -1,4 +1,4 @@
-# 모델 설정 파일 — LLM_BACKEND 값에 따라 해당 섹션의 모델이 사용됩니다.
+﻿# 모델 설정 파일 — LLM_BACKEND 값에 따라 해당 섹션의 모델이 사용됩니다.
 # 변경 후 앱만 재시작하면 됩니다: docker compose restart app
 
 # --- OpenRouter 모델 설정 (LLM_BACKEND=openrouter) ---
@@ -11,20 +11,16 @@ rag_query_model: "openai/gpt-oss-20b:free"
 
 # --- Ollama 로컬 모델 설정 (LLM_BACKEND=ollama) ---
 # 서버 사양: Xeon Silver 4208 x2, 251GB RAM (GPU 없음, CPU 추론)
-# 메모리 합계: QA ~17GB + Classifier ~1.3GB + Vision ~5GB = ~23GB
+# 메모리 합계: QA ~9GB + Classifier ~2GB + Vision ~4.5GB = ~15.5GB
 # 모델 교체 및 조합은 docs/OLLAMA_MODELS.md 참고
 
-# QA / 요약 (체급 다운사이징 32B ➡️ 14B): CPU 점유 시간을 대폭 줄여 웹/DB 지연 방지
-# ollama_qa_model: "deepseek-r1:14b-qwen-distill-q4_K_M"       # 성능 중심 (추론/논리 향상, ~9GB)
-ollama_qa_model: "qwen2.5:14b-instruct-q4_K_M"          # 요약과 통일된 모델로 깔끔한 답변 (추론은 약간 떨어질 수 있음, ~9GB)
-# 만약 슬랙봇의 코딩/파이썬 답변 퀄리티를 극대화하고 싶다면 현재 페이지의 모델 적용 가능:
-# ollama_qa_model: "hf.co/yuxinlu1/gemma-4-12B-coder-fable5-composer2.5-v1-GGUF:Q4_K_M" (~7.4GB)
+# QA / 요약 (개발/IT 지식 및 디버깅에 특화된 Coder 모델, 14B 체급 유지로 속도 보존 ~9GB)
+ollama_qa_model: "qwen2.5-coder:14b-instruct-q4_K_M"
+ollama_summary_model: "qwen2.5-coder:14b-instruct-q4_K_M"
 
-ollama_summary_model: "qwen2.5:14b-instruct-q4_K_M"          # 요약은 추론(R1)보다 정석 LLM이 더 깔끔함 (~9GB)
+# 분류기 / RAG 쿼리 변환 (CPU 연산 절약을 위해 3B 경량화, 라벨 분류 및 검색어 변환에 충분 ~2GB)
+ollama_classifier_model: "qwen2.5:3b-instruct-q4_K_M"
+ollama_rag_query_model: "qwen2.5:3b-instruct-q4_K_M"
 
-# 분류기 / RAG 쿼리 변환 (기존 유지): 2.4B 체급은 가볍고 빨라 CPU 환경에 최적
-ollama_classifier_model: "exaone3.5:7.8b"          # 라벨 분류용 (~1.3GB)
-ollama_rag_query_model: "exaone3.5:7.8b"           # RAG 검색어 확장/변환용 (~1.3GB)
-
-# 비전 (차세대 모델 업그레이드 또는 경량화):
-ollama_image: "qwen2.5vl:3b-q4_K_M"                         # CPU 속도를 위해 3B 추천 (용량 반토막, 속도 UP, ~3.2GB)
+# 비전 (에러 로그 및 스크린샷 텍스트 판독력 강화를 위해 7B 업그레이드 ~4.5GB)
+ollama_image: "qwen2.5-vl:7b-q4_K_M"

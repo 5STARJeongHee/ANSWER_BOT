@@ -113,7 +113,7 @@ RAG_CHUNK_MAX_CHARS: int = int(os.getenv("RAG_CHUNK_MAX_CHARS", "500"))
 # 최근 대화 포함 메시지 수 (다자 대화 컨텍스트 고려)
 RECENT_MESSAGE_COUNT: int = int(os.getenv("RECENT_MESSAGE_COUNT", "8"))
 # 임베딩 최소 문자 수 — 이보다 짧은 메시지는 RAG 노이즈 방지를 위해 임베딩 생략
-EMBED_MIN_CHARS: int = int(os.getenv("EMBED_MIN_CHARS", "30"))
+EMBED_MIN_CHARS: int = int(os.getenv("EMBED_MIN_CHARS", "15"))
 
 # --- LLM 설정 ---
 MAX_CONTEXT_TOKENS: int = int(os.getenv("MAX_CONTEXT_TOKENS", "6000"))
