@@ -53,15 +53,14 @@ def backfill_channel(
     session_factory,
     channel_id: str,
     days: int = _BACKFILL_DAYS,
+    force: bool = False,
 ) -> int:
     """
     지정 채널의 최근 N일 대화를 수집하여 DB에 저장한다.
-    이미 수집된 메시지는 중복 없이 건너뜀.
-    수집된 신규 메시지 수를 반환한다.
+    - force=False(기본): 이미 수집된 메시지는 건너뜀. 아직 수집 안 된 과거 구간만 채운다.
+    - force=True: 조기 종료 없이 전체 기간을 재수집하고 기존 메시지를 갱신한다.
+    수집된 신규/갱신 메시지 수를 반환한다.
     """
-    # oldest(하한)는 항상 N일 전으로 고정한다.
-    # DB에 데이터가 있으면 가장 오래된 ts를 latest(상한)로 설정해 아직 수집 안 된
-    # 과거 구간만 채운다. 중단 후 재실행해도 남은 과거 구간을 이어서 수집한다.
     fallback_dt = datetime.utcnow() - timedelta(days=days)
     oldest_ts = _datetime_to_slack_ts(fallback_dt)
 
@@ -71,24 +70,30 @@ def backfill_channel(
     finally:
         session.close()
 
-    if oldest_db_ts and float(oldest_db_ts) <= float(oldest_ts):
-        # DB 최솟값이 이미 N일 전보다 오래됨 → 수집할 과거 구간 없음
-        logger.info(
-            f"백필 스킵 — 이미 {days}일치 모두 수집됨 (channel={channel_id}, "
-            f"db_oldest={_slack_ts_to_datetime(oldest_db_ts).strftime('%Y-%m-%d %H:%M')})"
-        )
-        return 0
+    if not force:
+        # 일반 모드: DB 최솟값이 이미 N일 전보다 오래됨 → 수집할 과거 구간 없음
+        if oldest_db_ts and float(oldest_db_ts) <= float(oldest_ts):
+            logger.info(
+                f"백필 스킵 — 이미 {days}일치 모두 수집됨 (channel={channel_id}, "
+                f"db_oldest={_slack_ts_to_datetime(oldest_db_ts).strftime('%Y-%m-%d %H:%M')})"
+            )
+            return 0
 
-    if oldest_db_ts:
-        # DB에 데이터가 있으면 그 직전까지만 수집 (이미 있는 구간 스킵)
+    if not force and oldest_db_ts:
+        # 일반 모드: DB에 데이터가 있으면 그 직전까지만 수집
         latest_ts: Optional[str] = str(float(oldest_db_ts) - 0.000001)
         oldest_label = (
             f"최근 {days}일 ~ "
             f"{_slack_ts_to_datetime(oldest_db_ts).strftime('%Y-%m-%d %H:%M')} 이전"
         )
     else:
+        # force 모드 또는 DB 비어있음: 전체 기간 수집
         latest_ts = None
-        oldest_label = f"최근 {days}일 전체 (oldest={fallback_dt.strftime('%Y-%m-%d')})"
+        oldest_label = (
+            f"최근 {days}일 전체 재수집 (force)"
+            if force
+            else f"최근 {days}일 전체 (oldest={fallback_dt.strftime('%Y-%m-%d')})"
+        )
 
     logger.info(f"백필 시작 (channel={channel_id}, 범위={oldest_label})")
 
@@ -172,6 +177,7 @@ def backfill_channel(
                         user_id=user_id,
                         role=role,
                         content=clean_content,
+                        force=force,
                     )
 
                     if saved:
@@ -245,10 +251,16 @@ def backfill_channel(
     return collected_count
 
 
-def run_all_channels_backfill(client: WebClient, session_factory, days: int = _BACKFILL_DAYS) -> None:
+def run_all_channels_backfill(
+    client: WebClient,
+    session_factory,
+    days: int = _BACKFILL_DAYS,
+    force: bool = False,
+) -> None:
     """
     모든 대상 채널의 백필을 순차 실행한다.
     최초 배포 시 수동 또는 배치로 1회 실행한다.
+    force=True이면 이미 수집된 데이터도 재수집한다.
     """
     if not config.TARGET_CHANNEL_IDS:
         logger.warning("백필 대상 채널이 없음. TARGET_CHANNEL_IDS를 설정하세요.")
@@ -261,9 +273,10 @@ def run_all_channels_backfill(client: WebClient, session_factory, days: int = _B
             session_factory=session_factory,
             channel_id=channel_id,
             days=days,
+            force=force,
         )
         total += count
         # 채널 간 대기 (rate limit 분산)
         time.sleep(2)
 
-    logger.info(f"전체 백필 완료: 총 {total}건 수집")
+    logger.info(f"전체 백필 완료: 총 {total}건 수집{'(강제 재수집)' if force else ''}")

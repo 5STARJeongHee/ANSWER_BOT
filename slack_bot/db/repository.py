@@ -30,12 +30,15 @@ def upsert_message(
     content: str,
     is_question: Optional[bool] = None,
     is_fallback: bool = False,
+    force: bool = False,
 ) -> Optional[ConversationMessage]:
     """
-    메시지를 저장한다. event_id 또는 (channel_id, message_ts) 기준 중복이면 None을 반환한다.
+    메시지를 저장한다.
+    - force=False(기본): event_id 또는 (channel_id, message_ts) 기준 중복이면 None을 반환한다.
+    - force=True: 기존 메시지가 있으면 content를 갱신하고 기존 임베딩을 삭제(재생성 유도)한다.
     """
     # 중복 체크: event_id 우선, 없으면 (channel_id, message_ts) 확인
-    if event_id:
+    if event_id and not force:
         existing = (
             session.query(ConversationMessage)
             .filter(ConversationMessage.event_id == event_id)
@@ -53,9 +56,22 @@ def upsert_message(
         )
         .first()
     )
+
     if existing:
-        logger.debug(f"중복 메시지 스킵: channel={channel_id} ts={message_ts}")
-        return None
+        if not force:
+            logger.debug(f"중복 메시지 스킵: channel={channel_id} ts={message_ts}")
+            return None
+
+        # force=True: content 갱신 + 기존 임베딩 삭제 (호출자가 재생성)
+        existing.content = content
+        if is_question is not None:
+            existing.is_question = is_question
+        session.query(ContextEmbedding).filter(
+            ContextEmbedding.source_message_id == existing.id
+        ).delete(synchronize_session=False)
+        session.flush()
+        logger.debug(f"강제 갱신: channel={channel_id} ts={message_ts} id={existing.id}")
+        return existing
 
     msg = ConversationMessage(
         event_id=event_id,

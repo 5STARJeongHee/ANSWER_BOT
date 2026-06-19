@@ -192,6 +192,7 @@ def _run_backfill_in_background(
                         session_factory=session_factory,
                         channel_id=ch_id,
                         days=days,
+                        force=True,  # 슬랙 명령 백필은 항상 강제 재수집
                     )
                     total += count
                     post_message(
