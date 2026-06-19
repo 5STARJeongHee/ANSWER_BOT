@@ -31,5 +31,11 @@ pyyaml>=6.0
 # 이미지 처리 (첨부 이미지 압축)
 Pillow>=10.0.0
 
+# 파일 형식별 텍스트 추출 (RAG용 첨부파일 처리)
+openpyxl>=3.1.0          # xlsx 파싱
+python-docx>=1.1.0       # docx/doc 파싱
+pypdf>=4.0.0             # pdf 텍스트 추출
+# openai-whisper          # 동영상(mov/mp4) 전사 — 선택 설치: pip install openai-whisper
+
 # 로깅
 structlog==24.4.0

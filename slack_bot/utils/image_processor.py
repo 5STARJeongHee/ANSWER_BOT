@@ -79,12 +79,14 @@ def download_and_compress(url: str, bot_token: str) -> str | None:
 
 def analyze_slack_files(files: list[dict], bot_token: str) -> str:
     """
-    Slack files 목록에서 이미지를 분석하여 텍스트를 반환한다.
-    이미지가 없거나 분석 실패 시 빈 문자열을 반환한다.
-    세마포어로 vision 호출을 직렬화하여 CPU 서버 과부하를 방지한다.
+    Slack files 목록에서 이미지를 분석하고, 비이미지 파일(txt, xlsx, docx, pdf, mov 등)의
+    텍스트도 함께 추출하여 반환한다.
+    결과가 없으면 빈 문자열을 반환한다.
     """
     from services.llm_service import call_vision
+    from utils.file_processor import extract_file_texts
 
+    # ── 이미지: vision 모델로 분석 ──────────────────────────────────────────
     images_b64: list[str] = []
     for f in files:
         if len(images_b64) >= _MAX_IMAGES:
@@ -99,28 +101,34 @@ def analyze_slack_files(files: list[dict], bot_token: str) -> str:
         if b64:
             images_b64.append(b64)
 
-    if not images_b64:
-        return ""
+    image_results: list[str] = []
+    if images_b64:
+        # 이미지를 1장씩 개별 호출한다.
+        # 여러 장을 묶으면 n_prompt_tokens이 4096을 초과하므로 반드시 분리한다.
+        # 세마포어는 호출마다 잡고 놓아 이미지 사이 간격에 QA 요청이 끼어들 수 있게 한다.
+        count = len(images_b64)
+        for i, b64 in enumerate(images_b64, 1):
+            with _get_vision_semaphore():
+                part = call_vision([b64], _IMAGE_DESCRIBE_PROMPT)
+            if part:
+                label = f"[이미지 {i}] " if count > 1 else ""
+                image_results.append(f"{label}{part.strip()}")
+            else:
+                logger.warning(f"이미지 {i}/{count}장 분석 실패")
 
-    # 이미지를 1장씩 개별 호출한다.
-    # 여러 장을 묶으면 n_prompt_tokens이 4096을 초과하므로 반드시 분리한다.
-    # 세마포어는 호출마다 잡고 놓아 이미지 사이 간격에 QA 요청이 끼어들 수 있게 한다.
-    count = len(images_b64)
-    results: list[str] = []
-    for i, b64 in enumerate(images_b64, 1):
-        with _get_vision_semaphore():
-            part = call_vision([b64], _IMAGE_DESCRIBE_PROMPT)
-        if part:
-            label = f"[이미지 {i}] " if count > 1 else ""
-            results.append(f"{label}{part.strip()}")
+        if image_results:
+            logger.info(f"이미지 분석 완료: {len(image_results)}/{count}장")
         else:
-            logger.warning(f"이미지 {i}/{count}장 분석 실패")
+            logger.warning(f"이미지 분석 전체 실패: {count}장")
 
-    if results:
-        logger.info(f"이미지 분석 완료: {len(results)}/{count}장")
-        return "\n".join(results)
-    logger.warning(f"이미지 분석 전체 실패: {count}장")
-    return ""
+    # ── 비이미지 파일: 텍스트 추출 ─────────────────────────────────────────
+    file_text = extract_file_texts(files, bot_token)
+    if file_text:
+        logger.info(f"비이미지 파일 텍스트 추출 완료 ({len(file_text)}자)")
+
+    # ── 결과 통합 ─────────────────────────────────────────────────────────
+    parts = [p for p in ["\n".join(image_results), file_text] if p]
+    return "\n\n".join(parts) if parts else ""
 
 
 def _resize_if_needed(img: Image.Image) -> Image.Image:
