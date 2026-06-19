@@ -53,6 +53,11 @@ ENABLE_DM_HANDLER: bool = os.getenv("ENABLE_DM_HANDLER", "true").lower() == "tru
 _raw_fallback = os.getenv("FALLBACK_MENTION_USER_IDS", "")
 FALLBACK_MENTION_USER_IDS: list[str] = [u.strip() for u in _raw_fallback.split(",") if u.strip()]
 
+# 백필 명령 허용 사용자 목록 (Slack user_id, 예: U012AB3CD)
+# 비어 있으면 모든 사용자가 백필 명령을 실행할 수 있다.
+_raw_backfill_admins = os.getenv("BACKFILL_ADMIN_USER_IDS", "")
+BACKFILL_ADMIN_USER_IDS: list[str] = [u.strip() for u in _raw_backfill_admins.split(",") if u.strip()]
+
 # --- LLM 백엔드 선택 ---
 # "openrouter": OpenRouter API (기본, API 키 필요)
 # "ollama":     로컬 Ollama 서버 (API 키 불필요, 서버 자체 운용)

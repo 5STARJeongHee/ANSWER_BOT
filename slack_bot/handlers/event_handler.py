@@ -26,6 +26,7 @@ from services.slack_service import (
     get_user_display_name,
     fetch_thread_history,
 )
+from ui.message_blocks import build_intro_blocks
 from services.summarizer import summarize_thread_context
 from utils.image_processor import analyze_slack_files
 from utils.pii_filter import apply_pii_filter, has_pii
@@ -35,6 +36,193 @@ logger = logging.getLogger(__name__)
 
 # _process_question의 rag_channel_id 기본값 sentinel — 미전달 시 channel_id와 동일하게 동작
 _RAG_CHANNEL_DEFAULT = object()
+
+# ---------------------------------------------------------------------------
+# 백필 명령 처리
+# ---------------------------------------------------------------------------
+_BACKFILL_KEYWORDS = ("백필", "backfill", "재수집")
+_BACKFILL_DEFAULT_DAYS = 90
+_BACKFILL_MAX_DAYS = 365
+
+# 동시 백필 실행 방지 플래그
+_backfill_running = threading.Event()
+
+
+def _parse_backfill_days(text: str) -> int:
+    """
+    '7일', '2주', '한달', '3개월', '90' 등 자연어 기간 표현을 일수로 변환한다.
+    인식 불가 시 기본값(_BACKFILL_DEFAULT_DAYS)을 반환한다.
+    """
+    t = text.strip().lower().replace(" ", "")
+
+    # 숫자만 (e.g. "30", "90")
+    if t.isdigit():
+        return min(int(t), _BACKFILL_MAX_DAYS)
+
+    # 주 단위: "2주", "1주일"
+    import re
+    m = re.match(r"(\d+)\s*주", t)
+    if m:
+        return min(int(m.group(1)) * 7, _BACKFILL_MAX_DAYS)
+
+    # 개월 단위: "1개월", "3달", "한달"
+    if t in ("한달", "1달", "1개월"):
+        return 30
+    if t in ("두달", "2달", "2개월"):
+        return 60
+    if t in ("세달", "3달", "3개월"):
+        return 90
+    m = re.match(r"(\d+)\s*(?:개월|달)", t)
+    if m:
+        return min(int(m.group(1)) * 30, _BACKFILL_MAX_DAYS)
+
+    # 일 단위: "7일", "14일"
+    m = re.match(r"(\d+)\s*일", t)
+    if m:
+        return min(int(m.group(1)), _BACKFILL_MAX_DAYS)
+
+    # 별도 표현
+    if t in ("일주일", "1주일"):
+        return 7
+    if t in ("오늘", "today"):
+        return 1
+    if t in ("전체", "all"):
+        return _BACKFILL_MAX_DAYS
+
+    return _BACKFILL_DEFAULT_DAYS
+
+
+def _is_backfill_command(text: str) -> tuple[bool, int]:
+    """
+    텍스트가 백필 명령인지 확인한다.
+    반환: (is_backfill: bool, days: int)
+    명령 형식: 백필 [기간]  (기간 생략 시 기본값 90일)
+    예) "백필", "백필 7일", "backfill 2주", "재수집 한달", "백필 30"
+    """
+    stripped = text.strip()
+    lower = stripped.lower()
+    for kw in _BACKFILL_KEYWORDS:
+        if lower == kw or lower.startswith(kw + " ") or lower.startswith(kw + "\n"):
+            rest = stripped[len(kw):].strip()
+            days = _parse_backfill_days(rest) if rest else _BACKFILL_DEFAULT_DAYS
+            return True, days
+    return False, 0
+
+
+# ---------------------------------------------------------------------------
+# 소개 / 도움말 명령 처리
+# ---------------------------------------------------------------------------
+_INTRO_KEYWORDS = (
+    # 자기소개
+    "자기소개", "소개해줘", "소개 해줘", "소개좀", "소개 좀",
+    "봇 소개", "너 누구야", "넌 누구야", "너는 누구",
+    # 사용법
+    "사용법", "어떻게 써", "어떻게 사용", "사용 방법", "쓰는 법", "쓰는법",
+    "어떻게 쓰는", "어떻게쓰는",
+    # 기능
+    "기능이 뭐야", "기능 알려줘", "뭘 할 수 있어", "무엇을 할 수 있", "뭐 할 수 있",
+    "무슨 기능", "어떤 기능",
+    # 도움말
+    "도움말", "help", "명령어",
+    # 소개 단독
+    "소개",
+)
+
+
+def _is_intro_command(text: str) -> bool:
+    """텍스트가 봇 소개·사용법·도움말 요청인지 확인한다."""
+    lower = text.strip().lower().replace(" ", "")
+    return any(kw.replace(" ", "") in lower for kw in _INTRO_KEYWORDS)
+
+
+def _run_backfill_in_background(
+    client,
+    channel_id: str,
+    thread_ts: Optional[str],
+    days: int,
+    session_factory,
+) -> None:
+    """
+    채널별 백필을 백그라운드 스레드로 실행하고 Slack에 진행 상황을 전송한다.
+    동시 실행 방지: 이미 실행 중이면 즉시 반환한다.
+    """
+    from batch.collector import backfill_channel
+    from slack_sdk import WebClient
+
+    if _backfill_running.is_set():
+        post_message(
+            client=client,
+            channel=channel_id,
+            thread_ts=thread_ts,
+            text="⏳ 이미 백필이 실행 중입니다. 완료 후 다시 시도해 주세요.",
+        )
+        return
+
+    if not config.TARGET_CHANNEL_IDS:
+        post_message(
+            client=client,
+            channel=channel_id,
+            thread_ts=thread_ts,
+            text="⚠️ TARGET_CHANNEL_IDS가 설정되지 않아 백필할 채널이 없습니다.",
+        )
+        return
+
+    post_message(
+        client=client,
+        channel=channel_id,
+        thread_ts=thread_ts,
+        text=(
+            f"🔄 *백필 시작*\n"
+            f"• 기간: 최근 *{days}일*\n"
+            f"• 대상 채널: {len(config.TARGET_CHANNEL_IDS)}개\n"
+            f"채널별 완료 시 결과를 알려드립니다."
+        ),
+    )
+
+    def worker():
+        _backfill_running.set()
+        try:
+            bf_client = WebClient(token=config.SLACK_BOT_TOKEN)
+            total = 0
+            failed = 0
+            for ch_id in config.TARGET_CHANNEL_IDS:
+                try:
+                    count = backfill_channel(
+                        client=bf_client,
+                        session_factory=session_factory,
+                        channel_id=ch_id,
+                        days=days,
+                    )
+                    total += count
+                    post_message(
+                        client=client,
+                        channel=channel_id,
+                        thread_ts=thread_ts,
+                        text=f"  ✅ <#{ch_id}> — {count}건 수집 완료",
+                    )
+                except Exception as exc:
+                    failed += 1
+                    logger.error(f"백필 오류 (channel={ch_id}): {exc}", exc_info=True)
+                    post_message(
+                        client=client,
+                        channel=channel_id,
+                        thread_ts=thread_ts,
+                        text=f"  ❌ <#{ch_id}> — 오류 발생: {exc}",
+                    )
+
+            summary = f"🎉 *백필 완료!* 총 *{total}건* 수집"
+            if failed:
+                summary += f" (실패 채널 {failed}개)"
+            post_message(
+                client=client,
+                channel=channel_id,
+                thread_ts=thread_ts,
+                text=summary,
+            )
+        finally:
+            _backfill_running.clear()
+
+    threading.Thread(target=worker, daemon=True, name="slack-cmd-backfill").start()
 
 # ---------------------------------------------------------------------------
 # 이벤트 중복 방지 (Socket Mode는 기본 2개 연결로 동일 이벤트를 두 번 전달함)
@@ -458,6 +646,43 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
                 thread_ts=thread_ts,
             )
             return
+
+        # ── 소개 / 도움말 명령 감지 ─────────────────────────────────────────
+        if _is_intro_command(question):
+            logger.info(f"소개 명령 수신: user={user_id}")
+            payload = build_intro_blocks()
+            post_message(
+                client=client,
+                channel=channel_id,
+                thread_ts=thread_ts,
+                text=payload["text"],
+                blocks=payload["blocks"],
+            )
+            return
+        # ────────────────────────────────────────────────────────────────────
+
+        # ── 백필 명령 감지 ──────────────────────────────────────────────────
+        is_backfill, backfill_days = _is_backfill_command(question)
+        if is_backfill:
+            # 권한 확인: BACKFILL_ADMIN_USER_IDS가 설정된 경우 해당 사용자만 허용
+            if config.BACKFILL_ADMIN_USER_IDS and user_id not in config.BACKFILL_ADMIN_USER_IDS:
+                post_message(
+                    client=client,
+                    channel=channel_id,
+                    thread_ts=thread_ts,
+                    text="⛔ 백필 실행 권한이 없습니다. 관리자에게 문의하세요.",
+                )
+                return
+            logger.info(f"백필 명령 수신: user={user_id} days={backfill_days}")
+            _run_backfill_in_background(
+                client=client,
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+                days=backfill_days,
+                session_factory=session_factory,
+            )
+            return
+        # ────────────────────────────────────────────────────────────────────
 
         logger.info(f"앱 멘션 수신: channel={channel_id} user={user_id} text={question[:50]!r}")
 
