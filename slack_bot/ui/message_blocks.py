@@ -518,13 +518,13 @@ def build_history_blocks(messages: list[Any], channel_name: str = "이 채널") 
             emoji = _CATEGORY_EMOJI.get(cat, ":speech_balloon:")
             label = _CATEGORY_LABEL.get(cat, cat)
             date_str = _fmt_dt(msg.created_at)
-            # 작성자 표시 (user_id가 있으면 멘션)
             author = f"<@{msg.user_id}>" if msg.user_id else "익명"
-            # 내용 truncate: 45자
-            text_preview = (msg.content or "")[:45].replace("\n", " ")
-            if len(msg.content or "") > 45:
+            topic = getattr(msg, "topic", None)
+            topic_tag = f"  `{topic}`" if topic else ""
+            text_preview = (msg.content or "")[:40].replace("\n", " ")
+            if len(msg.content or "") > 40:
                 text_preview += "…"
-            lines.append(f"`{i}.` {date_str}  {emoji} *{label}*  {author}  {text_preview}")
+            lines.append(f"`{i}.` {date_str}  {emoji} *{label}*{topic_tag}  {author}  {text_preview}")
 
         blocks.append(
             {
@@ -558,7 +558,11 @@ def build_history_blocks(messages: list[Any], channel_name: str = "이 채널") 
 # 대시보드 통계 블록
 # ---------------------------------------------------------------------------
 
-def build_dashboard_blocks(stats: dict, fallback_questions: Optional[list[str]] = None) -> dict:
+def build_dashboard_blocks(
+    stats: dict,
+    fallback_questions: Optional[list[str]] = None,
+    top_topics: Optional[list[tuple[str, int]]] = None,
+) -> dict:
     """
     챗봇 대시보드 통계 Block Kit 페이로드를 반환한다.
     stats: get_dashboard_stats() 반환값.
@@ -671,6 +675,23 @@ def build_dashboard_blocks(stats: dict, fallback_questions: Optional[list[str]] 
             ],
         },
     ]
+
+    # 자주 묻는 주제 섹션
+    if top_topics:
+        topic_lines = "\n".join(
+            f"`{i}.` {t}  _{cnt}건_"
+            for i, (t, cnt) in enumerate(top_topics, 1)
+        )
+        blocks.append({"type": "divider"})
+        blocks.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"*:label: 자주 묻는 주제 Top {len(top_topics)}*\n{topic_lines}",
+                },
+            }
+        )
 
     # Fallback 트리거 키워드 섹션
     if fallback_questions:

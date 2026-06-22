@@ -135,3 +135,33 @@ def classify_message(
         f"메시지={message[:50]!r}"
     )
     return result
+
+
+# ---------------------------------------------------------------------------
+# 주제 태그 추출
+# ---------------------------------------------------------------------------
+
+_TOPIC_SYSTEM_PROMPT = (
+    "너는 사내 Slack 대화에서 핵심 주제를 추출하는 태거다. "
+    "입력 메시지의 핵심 주제를 한국어 2~5단어로 추출하라. "
+    "구체적인 기술명·업무 영역·오류 유형을 포함하라. "
+    '예시: "Redis 연결 오류", "Docker 배포 실패", "API 인증 처리", "DB 마이그레이션 방법"\n'
+    'JSON만 출력: {"topic": "핵심 주제"}'
+)
+
+
+def extract_topic(message: str) -> Optional[str]:
+    """메시지에서 2~5단어 핵심 주제 태그를 추출한다. 실패 또는 너무 짧은 메시지이면 None을 반환한다."""
+    if not message or len(message.strip()) < 10:
+        return None
+
+    llm_messages = [
+        {"role": "system", "content": _TOPIC_SYSTEM_PROMPT},
+        {"role": "user", "content": f"메시지: {message[:500]}"},
+    ]
+    raw = call_classifier(llm_messages)
+    parsed = parse_json_response(raw or "", default={"topic": ""})
+    topic = str(parsed.get("topic", "")).strip()
+    if topic:
+        logger.debug(f"주제 추출: {topic!r} | 메시지={message[:50]!r}")
+    return topic if topic else None

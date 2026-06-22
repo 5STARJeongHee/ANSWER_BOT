@@ -48,6 +48,7 @@ class ConversationMessage(Base):
     completion_tokens = Column(Integer, nullable=True)    # LLM이 생성한 출력 토큰 수
     rag_avg_similarity = Column(Float, nullable=True)     # RAG top-k 평균 유사도 (0~1)
     used_web_search = Column(Boolean, default=False)      # 웹 검색 보조 사용 여부
+    topic = Column(String(100), nullable=True)            # LLM 추출 핵심 주제 태그 (예: "Redis 연결 오류")
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     __table_args__ = (
@@ -242,6 +243,7 @@ def init_db(engine=None) -> None:
         "ALTER TABLE conversation_message ADD COLUMN IF NOT EXISTS completion_tokens INTEGER;",
         "ALTER TABLE conversation_message ADD COLUMN IF NOT EXISTS rag_avg_similarity FLOAT;",
         "ALTER TABLE conversation_message ADD COLUMN IF NOT EXISTS used_web_search BOOLEAN DEFAULT FALSE;",
+        "ALTER TABLE conversation_message ADD COLUMN IF NOT EXISTS topic VARCHAR(100);",
     ]
     with engine.connect() as conn:
         for stmt in _new_cols:

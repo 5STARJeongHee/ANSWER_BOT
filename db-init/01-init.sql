@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS conversation_message (
     completion_tokens   INTEGER,                     -- LLM 출력 추정 토큰
     rag_avg_similarity  FLOAT,                       -- RAG top-k 평균 유사도 (0~1)
     used_web_search     BOOLEAN      DEFAULT FALSE,  -- 웹 검색 보조 사용 여부
+    topic               VARCHAR(100),                -- LLM 추출 핵심 주제 태그 (예: "Redis 연결 오류")
     created_at          TIMESTAMP    NOT NULL DEFAULT NOW(),
 
     CONSTRAINT uq_channel_message_ts UNIQUE (channel_id, message_ts)
@@ -44,6 +45,9 @@ CREATE INDEX IF NOT EXISTS ix_conv_msg_category
 CREATE INDEX IF NOT EXISTS ix_conv_msg_rag_similarity
     ON conversation_message (rag_avg_similarity)
     WHERE rag_avg_similarity IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_conv_msg_topic
+    ON conversation_message (topic)
+    WHERE topic IS NOT NULL;
 
 -- ────────────────────────────────────────────────────────────────────────────
 -- context_embedding

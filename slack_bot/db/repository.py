@@ -36,6 +36,7 @@ def upsert_message(
     completion_tokens: Optional[int] = None,
     rag_avg_similarity: Optional[float] = None,
     used_web_search: bool = False,
+    topic: Optional[str] = None,
     force: bool = False,
 ) -> Optional[ConversationMessage]:
     """
@@ -83,6 +84,8 @@ def upsert_message(
         if rag_avg_similarity is not None:
             existing.rag_avg_similarity = rag_avg_similarity
         existing.used_web_search = used_web_search
+        if topic is not None:
+            existing.topic = topic
         session.query(ContextEmbedding).filter(
             ContextEmbedding.source_message_id == existing.id
         ).delete(synchronize_session=False)
@@ -106,6 +109,7 @@ def upsert_message(
         completion_tokens=completion_tokens,
         rag_avg_similarity=rag_avg_similarity,
         used_web_search=used_web_search,
+        topic=topic,
     )
     try:
         session.add(msg)
@@ -764,6 +768,29 @@ def get_recent_fallbacks(
         if len(result) >= limit:
             break
     return result
+
+
+def get_top_topics(
+    session: Session,
+    period_days: int = 7,
+    limit: int = 5,
+) -> list[tuple[str, int]]:
+    """최근 기간 동안 가장 많이 등장한 주제 태그를 빈도순으로 반환한다."""
+    since = datetime.utcnow() - timedelta(days=period_days)
+    rows = session.execute(
+        text(
+            "SELECT topic, COUNT(*) AS cnt "
+            "FROM conversation_message "
+            "WHERE role = 'user' AND is_question = TRUE "
+            "  AND topic IS NOT NULL AND topic != '' "
+            "  AND created_at >= :since "
+            "GROUP BY topic "
+            "ORDER BY cnt DESC "
+            "LIMIT :limit"
+        ),
+        {"since": since, "limit": limit},
+    ).fetchall()
+    return [(row[0], int(row[1])) for row in rows]
 
 
 def has_negative_feedback(session: Session, message_id: int) -> bool:

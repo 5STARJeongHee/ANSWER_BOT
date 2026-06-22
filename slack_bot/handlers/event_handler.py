@@ -16,8 +16,9 @@ from db.repository import (
     get_channel_question_history,
     get_dashboard_stats,
     get_recent_fallbacks,
+    get_top_topics,
 )
-from services.classifier import classify_message, MessageCategory
+from services.classifier import classify_message, extract_topic, MessageCategory
 from services.context_retriever import retrieve_context, format_context_for_prompt, embed_text
 from services.llm_service import call_qa
 from services.web_search import search_web, format_web_search_for_prompt
@@ -32,7 +33,11 @@ from services.slack_service import (
     get_user_display_name,
     fetch_thread_history,
 )
-from ui.message_blocks import build_intro_blocks, build_history_blocks, build_dashboard_blocks
+from ui.message_blocks import (
+    build_intro_blocks,
+    build_history_blocks,
+    build_dashboard_blocks,
+)
 from services.summarizer import summarize_thread_context
 from utils.image_processor import analyze_slack_files
 from utils.pii_filter import apply_pii_filter, has_pii
@@ -375,6 +380,7 @@ def _save_message_and_embed(
     completion_tokens: Optional[int] = None,
     rag_avg_similarity: Optional[float] = None,
     used_web_search: bool = False,
+    topic: Optional[str] = None,
 ) -> Optional[int]:
     """
     메시지를 저장하고 임베딩을 생성한다.
@@ -407,6 +413,7 @@ def _save_message_and_embed(
             completion_tokens=completion_tokens,
             rag_avg_similarity=rag_avg_similarity,
             used_web_search=used_web_search,
+            topic=topic,
         )
         if msg is None:
             session.commit()
@@ -795,7 +802,12 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
                 try:
                     stats = get_dashboard_stats(dash_session, period_days=dashboard_days)
                     fallbacks = get_recent_fallbacks(dash_session, period_days=dashboard_days, limit=5)
-                    payload = build_dashboard_blocks(stats, fallback_questions=fallbacks)
+                    top_topics = get_top_topics(dash_session, period_days=dashboard_days, limit=5)
+                    payload = build_dashboard_blocks(
+                        stats,
+                        fallback_questions=fallbacks,
+                        top_topics=top_topics,
+                    )
                     post_message(
                         client=client,
                         channel=channel_id,
@@ -839,6 +851,7 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
                 is_question=True,
                 category="QUESTION",
                 prompt_tokens=estimate_tokens(effective_question),
+                topic=extract_topic(effective_question),
             )
 
             # 스레드 문맥 조회 및 요약
@@ -939,6 +952,7 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
                     role="user",
                     content=effective_content,
                     is_question=True,
+                    topic=extract_topic(effective_content),
                 )
 
                 user_name = get_user_display_name(client, user_id) if user_id else "익명"
@@ -1033,6 +1047,7 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
             )
 
             from utils.token_counter import estimate_tokens
+            _topic = extract_topic(effective_content) if classify_result.is_actionable else None
             _save_message_and_embed(
                 session_factory=session_factory,
                 event_id=event_id,
@@ -1045,6 +1060,7 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
                 is_question=classify_result.is_actionable,
                 category=classify_result.category.value,
                 prompt_tokens=estimate_tokens(effective_content),
+                topic=_topic,
             )
 
             if not classify_result.is_actionable:
