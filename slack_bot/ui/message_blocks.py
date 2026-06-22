@@ -62,6 +62,7 @@ def build_answer_blocks(
     answer: str,
     context_count: int = 0,
     user_mention: Optional[str] = None,
+    show_thread_tip: bool = False,
 ) -> dict:
     """
     일반 QA 답변 Block Kit 페이로드를 반환한다.
@@ -126,6 +127,23 @@ def build_answer_blocks(
             ],
         }
     )
+
+    # 5. 스레드 사용 팁 (채널 최초 질문 시에만)
+    if show_thread_tip:
+        blocks.append(
+            {
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": (
+                            ":thread: 이 답변에 *스레드로 후속 질문*하시면 대화 맥락이 누적되어 "
+                            "다음 답변이 더 정확해집니다."
+                        ),
+                    }
+                ],
+            }
+        )
 
     # plain-text fallback: Slack 알림, 스크린리더에 사용
     plain_text = f"{clean_answer}\n\n[{footer}]"
@@ -315,6 +333,22 @@ def build_intro_blocks() -> dict:
                     "  기간 예시: `7일` `2주` `한달` `3개월` `90` *(숫자는 일 수)*\n"
                     "  기간 생략 시 기본 90일 기준으로 실행됩니다.\n\n"
                     "• *`@QNA BOT 소개`* / *`@QNA BOT 도움말`* — 이 안내를 다시 표시합니다."
+                ),
+            },
+        },
+        {"type": "divider"},
+
+        # 더 정확한 답변을 위한 팁
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    "*:thread: 더 정확한 답변을 원하신다면*\n\n"
+                    "• *스레드로 대화*하세요. 봇 답변에 스레드로 후속 질문을 달면 대화 흐름이 "
+                    "하나의 맥락으로 누적되어 이후 유사한 질문에도 더 정확한 답변이 제공됩니다.\n"
+                    "• *동료의 답변도 학습*됩니다. 스레드 안에서 동료가 직접 답변을 달면 "
+                    "그 내용이 봇의 지식으로 쌓여 다음 답변 품질이 높아집니다."
                 ),
             },
         },

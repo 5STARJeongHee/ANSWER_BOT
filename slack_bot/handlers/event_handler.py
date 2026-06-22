@@ -423,6 +423,7 @@ def _process_question(
     thread_summary: Optional[str] = None,
     rag_channel_id=_RAG_CHANNEL_DEFAULT,
     image_context: Optional[str] = None,
+    show_thread_tip: bool = False,
 ) -> None:
     """
     LLM으로 질문에 답변을 생성하고 Slack에 전송한다.
@@ -550,6 +551,7 @@ def _process_question(
             answer=answer,
             context_count=context_count,
             thinking_ts=thinking_ts,
+            show_thread_tip=show_thread_tip,
         )
 
         # 9. 피드백 이모지 시드 추가 (reactions:write 스코프 필요)
@@ -625,6 +627,7 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
         ack()
 
         channel_id = event.get("channel")
+        is_new_thread = event.get("thread_ts") is None  # 기존 스레드 없이 채널에서 새로 시작
         thread_ts = event.get("thread_ts") or event.get("ts")
         message_ts = event.get("ts", "")
         # app_mention과 message 이벤트는 동일한 event_ts를 가지므로 prefix로 구분한다.
@@ -734,6 +737,7 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
                 thinking_ts=thinking_ts,
                 thread_summary=thread_summary,
                 image_context=image_context or None,
+                show_thread_tip=is_new_thread,
             )
 
         threading.Thread(target=worker, daemon=True).start()

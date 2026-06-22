@@ -130,12 +130,13 @@ def post_answer(
     answer: str,
     context_count: int = 0,
     thinking_ts: Optional[str] = None,
+    show_thread_tip: bool = False,
 ) -> Optional[str]:
     """
     일반 QA 답변을 Block Kit으로 전송하거나 기존 thinking 메시지를 업데이트한다.
     전송된 메시지의 ts를 반환한다 (피드백 이모지 추가에 사용).
     """
-    payload = build_answer_blocks(answer=answer, context_count=context_count)
+    payload = build_answer_blocks(answer=answer, context_count=context_count, show_thread_tip=show_thread_tip)
 
     if thinking_ts:
         success = update_message_blocks(
