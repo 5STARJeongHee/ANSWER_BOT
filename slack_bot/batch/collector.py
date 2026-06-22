@@ -194,13 +194,14 @@ def backfill_channel(
                         dup_count += 1
                         page_dup += 1
 
-                # Thread 단위 청킹: 이 페이지에 등장한 스레드 답글의 thread_ts를 수집
+                # Thread 단위 청킹: conversations.history는 스레드 부모만 반환하므로
+                # thread_ts == ts인 부모도 포함해야 DB에 저장된 봇 답변과 함께 청크를 생성할 수 있다.
                 if config.ENABLE_THREAD_CHUNKING:
                     from db.repository import save_thread_chunk_embedding
                     thread_tss = {
                         msg.get("thread_ts")
                         for msg in valid_msgs
-                        if msg.get("thread_ts") and msg.get("thread_ts") != msg.get("ts")
+                        if msg.get("thread_ts")
                     }
                     for ts in thread_tss:
                         try:
