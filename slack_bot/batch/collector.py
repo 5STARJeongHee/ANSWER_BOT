@@ -1,6 +1,7 @@
 # 과거 Slack 대화 이력을 일괄 수집(백필)하는 배치 모듈
 from __future__ import annotations
 import logging
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
@@ -19,6 +20,27 @@ logger = logging.getLogger(__name__)
 # Slack conversations.history API rate limit: 50회/분
 # 1.3초 간격으로 요청하여 여유 있게 처리
 _API_CALL_INTERVAL = 1.3
+
+# ---------------------------------------------------------------------------
+# 봇 명령어 메시지 필터
+# ---------------------------------------------------------------------------
+_MENTION_RE = re.compile(r"<@[A-Z0-9]+>", re.IGNORECASE)
+_BACKFILL_CMD_RE = re.compile(
+    r"^(백필|backfill|재수집)"
+    r"(\s+(\d+일|\d+주일?|\d+개월|\d+달|한달|두달|세달|일주일|오늘|전체|all|\d+))?$",
+    re.IGNORECASE,
+)
+_INTRO_CMD_RE = re.compile(r"^(도움말|help|소개|명령어|사용법)$", re.IGNORECASE)
+
+
+def _is_bot_command_message(text: str) -> bool:
+    """봇 멘션 제거 후 봇 명령어 전용 메시지이면 True를 반환한다."""
+    cleaned = _MENTION_RE.sub("", text).strip()
+    if not cleaned:
+        return True  # 멘션만 있는 빈 메시지
+    return bool(_BACKFILL_CMD_RE.match(cleaned)) or bool(_INTRO_CMD_RE.match(cleaned))
+
+
 _BACKFILL_DAYS = 90
 # 이미지 다운로드 병렬 워커 수 (vision은 세마포어로 직렬화됨)
 _BACKFILL_IMAGE_WORKERS = 3
@@ -126,11 +148,12 @@ def backfill_channel(
             if not messages:
                 break
 
-            # subtype 제외, 텍스트 또는 파일이 있는 메시지만 처리
+            # subtype 제외, 텍스트 또는 파일이 있는 메시지만 처리, 봇 명령어 제외
             valid_msgs = [
                 msg for msg in messages
                 if msg.get("subtype") not in ("bot_message", "channel_join", "channel_leave")
                 and (msg.get("text", "").strip() or msg.get("files"))
+                and not _is_bot_command_message(msg.get("text", ""))
             ]
 
             # 이미지 다운로드를 병렬로 수행하고 vision 분석 결과를 텍스트에 붙인다.
