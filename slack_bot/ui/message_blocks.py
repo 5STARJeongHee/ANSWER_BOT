@@ -571,7 +571,8 @@ def build_dashboard_blocks(stats: dict) -> dict:
     pos = stats.get("positive_feedback", 0)
     neg = stats.get("negative_feedback", 0)
     avg_ms = stats.get("avg_response_ms")
-    total_tokens = stats.get("total_tokens", 0)
+    prompt_tokens = stats.get("total_prompt_tokens", 0)
+    completion_tokens = stats.get("total_completion_tokens", 0)
     q_count = stats.get("category_question", 0)
     r_count = stats.get("category_request", 0)
 
@@ -583,7 +584,8 @@ def build_dashboard_blocks(stats: dict) -> dict:
     avg_ms_str = f"{avg_ms / 1000:.1f}초" if avg_ms else "측정 중"
 
     # 토큰 수 표시
-    tokens_str = f"{total_tokens:,}" if total_tokens else "측정 중"
+    prompt_str = f"{prompt_tokens:,}" if prompt_tokens else "측정 중"
+    completion_str = f"{completion_tokens:,}" if completion_tokens else "측정 중"
 
     # 피드백 표시
     total_fb = pos + neg
@@ -635,10 +637,10 @@ def build_dashboard_blocks(stats: dict) -> dict:
         # 토큰 사용량
         {
             "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": f"*토큰 사용량 (추정)*\n{tokens_str} 토큰",
-            },
+            "fields": [
+                {"type": "mrkdwn", "text": f"*입력 토큰 (요청, 추정)*\n{prompt_str}"},
+                {"type": "mrkdwn", "text": f"*출력 토큰 (응답, 추정)*\n{completion_str}"},
+            ],
         },
         {
             "type": "context",

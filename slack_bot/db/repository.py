@@ -32,7 +32,8 @@ def upsert_message(
     is_fallback: bool = False,
     category: Optional[str] = None,
     response_time_ms: Optional[int] = None,
-    token_count: Optional[int] = None,
+    prompt_tokens: Optional[int] = None,
+    completion_tokens: Optional[int] = None,
     force: bool = False,
 ) -> Optional[ConversationMessage]:
     """
@@ -73,8 +74,10 @@ def upsert_message(
             existing.category = category
         if response_time_ms is not None:
             existing.response_time_ms = response_time_ms
-        if token_count is not None:
-            existing.token_count = token_count
+        if prompt_tokens is not None:
+            existing.prompt_tokens = prompt_tokens
+        if completion_tokens is not None:
+            existing.completion_tokens = completion_tokens
         session.query(ContextEmbedding).filter(
             ContextEmbedding.source_message_id == existing.id
         ).delete(synchronize_session=False)
@@ -94,7 +97,8 @@ def upsert_message(
         is_fallback=is_fallback,
         category=category,
         response_time_ms=response_time_ms,
-        token_count=token_count,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
     )
     try:
         session.add(msg)
@@ -626,11 +630,20 @@ def get_dashboard_stats(session: Session, period_days: int = 7) -> dict:
         .scalar()
     )
 
-    total_tokens = (
-        session.query(func.sum(ConversationMessage.token_count))
+    total_prompt_tokens = (
+        session.query(func.sum(ConversationMessage.prompt_tokens))
         .filter(
             ConversationMessage.created_at >= since,
-            ConversationMessage.token_count.isnot(None),
+            ConversationMessage.prompt_tokens.isnot(None),
+        )
+        .scalar()
+    ) or 0
+
+    total_completion_tokens = (
+        session.query(func.sum(ConversationMessage.completion_tokens))
+        .filter(
+            ConversationMessage.created_at >= since,
+            ConversationMessage.completion_tokens.isnot(None),
         )
         .scalar()
     ) or 0
@@ -660,7 +673,8 @@ def get_dashboard_stats(session: Session, period_days: int = 7) -> dict:
         "total_responses": int(total_responses),
         "fallback_count": int(fallback_count),
         "avg_response_ms": int(avg_response_ms) if avg_response_ms else None,
-        "total_tokens": int(total_tokens),
+        "total_prompt_tokens": int(total_prompt_tokens),
+        "total_completion_tokens": int(total_completion_tokens),
         "positive_feedback": feedback.get("positive", 0),
         "negative_feedback": feedback.get("negative", 0),
         "category_question": categories.get("QUESTION", 0),

@@ -370,7 +370,8 @@ def _save_message_and_embed(
     is_fallback: bool = False,
     category: Optional[str] = None,
     response_time_ms: Optional[int] = None,
-    token_count: Optional[int] = None,
+    prompt_tokens: Optional[int] = None,
+    completion_tokens: Optional[int] = None,
 ) -> Optional[int]:
     """
     메시지를 저장하고 임베딩을 생성한다.
@@ -399,7 +400,8 @@ def _save_message_and_embed(
             is_fallback=is_fallback,
             category=category,
             response_time_ms=response_time_ms,
-            token_count=token_count,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
         )
         if msg is None:
             session.commit()
@@ -556,6 +558,9 @@ def _process_question(
             system_prompt=system_prompt,
             max_tokens=config.MAX_CONTEXT_TOKENS,
         )
+        # 입력 토큰 추정 (LLM에 전달하기 직전)
+        from utils.token_counter import estimate_message_tokens
+        _prompt_tokens = estimate_message_tokens(messages_trimmed)
 
         # 6. 답변 생성
         answer = call_qa(messages_trimmed)
@@ -612,7 +617,7 @@ def _process_question(
             from ui.reaction_handler import add_feedback_reactions
             add_feedback_reactions(client=client, channel=channel_id, message_ts=sent_ts)
 
-        # 10. 봇 응답 저장 (응답 시간·토큰 수 함께 기록)
+        # 10. 봇 응답 저장 (응답 시간·입출력 토큰 수 함께 기록)
         _elapsed_ms = int((time.monotonic() - _start_time) * 1000)
         _save_message_and_embed(
             session_factory=session_factory,
@@ -625,7 +630,8 @@ def _process_question(
             content=answer,
             is_question=False,
             response_time_ms=_elapsed_ms,
-            token_count=estimate_tokens(answer),
+            prompt_tokens=_prompt_tokens,
+            completion_tokens=estimate_tokens(answer),
         )
 
     except Exception as exc:
@@ -820,7 +826,7 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
                 content=effective_question,
                 is_question=True,
                 category="QUESTION",
-                token_count=estimate_tokens(effective_question),
+                prompt_tokens=estimate_tokens(effective_question),
             )
 
             # 스레드 문맥 조회 및 요약
@@ -1026,7 +1032,7 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
                 content=effective_content,
                 is_question=classify_result.is_actionable,
                 category=classify_result.category.value,
-                token_count=estimate_tokens(effective_content),
+                prompt_tokens=estimate_tokens(effective_content),
             )
 
             if not classify_result.is_actionable:
