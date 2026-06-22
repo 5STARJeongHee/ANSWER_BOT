@@ -429,6 +429,18 @@ def build_greeting_blocks() -> dict:
                 }
             ],
         },
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": (
+                        ":information_source:  백필·파일 첨부 등 전체 기능은 "
+                        "`@QNA_BOT 도움말` 을 입력하면 확인할 수 있습니다."
+                    ),
+                }
+            ],
+        },
     ]
 
     return {
