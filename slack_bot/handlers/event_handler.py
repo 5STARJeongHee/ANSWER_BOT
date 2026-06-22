@@ -10,7 +10,12 @@ from slack_bolt import App
 
 import config
 from db.models import get_session_factory
-from db.repository import upsert_message, get_thread_starter_user_id
+from db.repository import (
+    upsert_message,
+    get_thread_starter_user_id,
+    get_channel_question_history,
+    get_dashboard_stats,
+)
 from services.classifier import classify_message, MessageCategory
 from services.context_retriever import retrieve_context, format_context_for_prompt, embed_text
 from services.llm_service import call_qa
@@ -26,7 +31,7 @@ from services.slack_service import (
     get_user_display_name,
     fetch_thread_history,
 )
-from ui.message_blocks import build_intro_blocks
+from ui.message_blocks import build_intro_blocks, build_history_blocks, build_dashboard_blocks
 from services.summarizer import summarize_thread_context
 from utils.image_processor import analyze_slack_files
 from utils.pii_filter import apply_pii_filter, has_pii
@@ -105,6 +110,45 @@ def _is_backfill_command(text: str) -> tuple[bool, int]:
         if lower == kw or lower.startswith(kw + " ") or lower.startswith(kw + "\n"):
             rest = stripped[len(kw):].strip()
             days = _parse_backfill_days(rest) if rest else _BACKFILL_DEFAULT_DAYS
+            return True, days
+    return False, 0
+
+
+# ---------------------------------------------------------------------------
+# 히스토리 명령 처리
+# ---------------------------------------------------------------------------
+_HISTORY_KEYWORDS = (
+    "히스토리", "history", "내 질문", "질문 목록", "질문목록",
+    "질문 이력", "질문이력", "대화 목록", "대화목록", "이력", "내 대화",
+)
+
+
+def _is_history_command(text: str) -> bool:
+    """텍스트가 질문 이력 조회 명령인지 확인한다."""
+    lower = text.strip().lower().replace(" ", "")
+    return any(kw.replace(" ", "") == lower or lower.startswith(kw.replace(" ", "")) for kw in _HISTORY_KEYWORDS)
+
+
+# ---------------------------------------------------------------------------
+# 대시보드 명령 처리
+# ---------------------------------------------------------------------------
+_DASHBOARD_KEYWORDS = (
+    "대시보드", "dashboard", "통계", "stats", "현황", "봇 통계", "봇통계", "이용 현황", "이용현황",
+)
+
+
+def _is_dashboard_command(text: str) -> tuple[bool, int]:
+    """
+    텍스트가 대시보드 명령인지 확인한다.
+    반환: (is_dashboard: bool, days: int)
+    """
+    stripped = text.strip()
+    lower = stripped.lower()
+    for kw in _DASHBOARD_KEYWORDS:
+        kw_lower = kw.lower()
+        if lower == kw_lower or lower.startswith(kw_lower + " ") or lower.startswith(kw_lower + "\n"):
+            rest = stripped[len(kw):].strip()
+            days = _parse_backfill_days(rest) if rest else 7
             return True, days
     return False, 0
 
@@ -324,6 +368,9 @@ def _save_message_and_embed(
     content: str,
     is_question: Optional[bool] = None,
     is_fallback: bool = False,
+    category: Optional[str] = None,
+    response_time_ms: Optional[int] = None,
+    token_count: Optional[int] = None,
 ) -> Optional[int]:
     """
     메시지를 저장하고 임베딩을 생성한다.
@@ -350,6 +397,9 @@ def _save_message_and_embed(
             content=clean_content,
             is_question=is_question,
             is_fallback=is_fallback,
+            category=category,
+            response_time_ms=response_time_ms,
+            token_count=token_count,
         )
         if msg is None:
             session.commit()
@@ -432,6 +482,9 @@ def _process_question(
     """
     # rag_channel_id 미전달이면 현재 채널, None이면 전체 채널 (DM에서 호출 시)
     effective_rag_channel = channel_id if rag_channel_id is _RAG_CHANNEL_DEFAULT else rag_channel_id
+
+    from utils.token_counter import estimate_tokens
+    _start_time = time.monotonic()
 
     session = session_factory()
     try:
@@ -559,7 +612,8 @@ def _process_question(
             from ui.reaction_handler import add_feedback_reactions
             add_feedback_reactions(client=client, channel=channel_id, message_ts=sent_ts)
 
-        # 10. 봇 응답 저장
+        # 10. 봇 응답 저장 (응답 시간·토큰 수 함께 기록)
+        _elapsed_ms = int((time.monotonic() - _start_time) * 1000)
         _save_message_and_embed(
             session_factory=session_factory,
             event_id=None,
@@ -570,6 +624,8 @@ def _process_question(
             role="bot",
             content=answer,
             is_question=False,
+            response_time_ms=_elapsed_ms,
+            token_count=estimate_tokens(answer),
         )
 
     except Exception as exc:
@@ -688,13 +744,61 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
             return
         # ────────────────────────────────────────────────────────────────────
 
+        # ── 히스토리 명령 감지 ──────────────────────────────────────────────
+        if _is_history_command(question):
+            logger.info(f"히스토리 명령 수신: user={user_id} channel={channel_id}")
+
+            def history_worker():
+                hist_session = session_factory()
+                try:
+                    messages = get_channel_question_history(hist_session, channel_id, limit=20)
+                    channel_label = f"<#{channel_id}>"
+                    payload = build_history_blocks(messages, channel_label)
+                    post_message(
+                        client=client,
+                        channel=channel_id,
+                        thread_ts=thread_ts,
+                        text=payload["text"],
+                        blocks=payload["blocks"],
+                    )
+                finally:
+                    hist_session.close()
+
+            threading.Thread(target=history_worker, daemon=True).start()
+            return
+        # ────────────────────────────────────────────────────────────────────
+
+        # ── 대시보드 명령 감지 ──────────────────────────────────────────────
+        is_dashboard, dashboard_days = _is_dashboard_command(question)
+        if is_dashboard:
+            logger.info(f"대시보드 명령 수신: user={user_id} days={dashboard_days}")
+
+            def dashboard_worker():
+                dash_session = session_factory()
+                try:
+                    stats = get_dashboard_stats(dash_session, period_days=dashboard_days)
+                    payload = build_dashboard_blocks(stats)
+                    post_message(
+                        client=client,
+                        channel=channel_id,
+                        thread_ts=thread_ts,
+                        text=payload["text"],
+                        blocks=payload["blocks"],
+                    )
+                finally:
+                    dash_session.close()
+
+            threading.Thread(target=dashboard_worker, daemon=True).start()
+            return
+        # ────────────────────────────────────────────────────────────────────
+
         logger.info(f"앱 멘션 수신: channel={channel_id} user={user_id} text={question[:50]!r}")
 
         # 즉시 '답변 중' 표시 전송 (3초 이내 ack 이후)
         thinking_ts = post_thinking_indicator(client=client, channel=channel_id, thread_ts=thread_ts)
 
-        # 사용자 메시지 저장 (비동기 스레드에서 처리)
         def worker():
+            from utils.token_counter import estimate_tokens
             user_name = get_user_display_name(client, user_id) if user_id else "익명"
 
             # 첨부 이미지가 있으면 압축 후 vision 모델로 분석 (최대 _MAX_IMAGES개)
@@ -715,6 +819,8 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
                 role="user",
                 content=effective_question,
                 is_question=True,
+                category="QUESTION",
+                token_count=estimate_tokens(effective_question),
             )
 
             # 스레드 문맥 조회 및 요약
@@ -908,6 +1014,7 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
                 sender_user_id=user_id,
             )
 
+            from utils.token_counter import estimate_tokens
             _save_message_and_embed(
                 session_factory=session_factory,
                 event_id=event_id,
@@ -918,6 +1025,8 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
                 role="user",
                 content=effective_content,
                 is_question=classify_result.is_actionable,
+                category=classify_result.category.value,
+                token_count=estimate_tokens(effective_content),
             )
 
             if not classify_result.is_actionable:

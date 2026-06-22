@@ -1,10 +1,10 @@
 # 데이터베이스 CRUD 함수 모음 - 모든 DB 접근은 이 모듈을 통한다
 from __future__ import annotations
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Optional
 
-from sqlalchemy import text
+from sqlalchemy import func, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -30,6 +30,9 @@ def upsert_message(
     content: str,
     is_question: Optional[bool] = None,
     is_fallback: bool = False,
+    category: Optional[str] = None,
+    response_time_ms: Optional[int] = None,
+    token_count: Optional[int] = None,
     force: bool = False,
 ) -> Optional[ConversationMessage]:
     """
@@ -66,6 +69,12 @@ def upsert_message(
         existing.content = content
         if is_question is not None:
             existing.is_question = is_question
+        if category is not None:
+            existing.category = category
+        if response_time_ms is not None:
+            existing.response_time_ms = response_time_ms
+        if token_count is not None:
+            existing.token_count = token_count
         session.query(ContextEmbedding).filter(
             ContextEmbedding.source_message_id == existing.id
         ).delete(synchronize_session=False)
@@ -83,6 +92,9 @@ def upsert_message(
         content=content,
         is_question=is_question,
         is_fallback=is_fallback,
+        category=category,
+        response_time_ms=response_time_ms,
+        token_count=token_count,
     )
     try:
         session.add(msg)
@@ -560,6 +572,102 @@ def get_thread_starter_user_id(
         ConversationMessage.message_ts == thread_ts,
     ).first()
     return msg.user_id if msg else None
+
+def get_channel_question_history(
+    session: Session,
+    channel_id: str,
+    limit: int = 20,
+) -> list[ConversationMessage]:
+    """채널의 질문·요청 이력을 최신순으로 반환한다 (전체 공유용)."""
+    return (
+        session.query(ConversationMessage)
+        .filter(
+            ConversationMessage.channel_id == channel_id,
+            ConversationMessage.role == "user",
+            ConversationMessage.is_question == True,
+        )
+        .order_by(ConversationMessage.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+
+
+def get_dashboard_stats(session: Session, period_days: int = 7) -> dict:
+    """챗봇 대시보드 집계 통계를 반환한다."""
+    since = datetime.utcnow() - timedelta(days=period_days)
+
+    total_responses = (
+        session.query(func.count(ConversationMessage.id))
+        .filter(
+            ConversationMessage.role == "bot",
+            ConversationMessage.is_fallback == False,
+            ConversationMessage.created_at >= since,
+        )
+        .scalar()
+    ) or 0
+
+    fallback_count = (
+        session.query(func.count(ConversationMessage.id))
+        .filter(
+            ConversationMessage.role == "bot",
+            ConversationMessage.is_fallback == True,
+            ConversationMessage.created_at >= since,
+        )
+        .scalar()
+    ) or 0
+
+    avg_response_ms = (
+        session.query(func.avg(ConversationMessage.response_time_ms))
+        .filter(
+            ConversationMessage.role == "bot",
+            ConversationMessage.response_time_ms.isnot(None),
+            ConversationMessage.created_at >= since,
+        )
+        .scalar()
+    )
+
+    total_tokens = (
+        session.query(func.sum(ConversationMessage.token_count))
+        .filter(
+            ConversationMessage.created_at >= since,
+            ConversationMessage.token_count.isnot(None),
+        )
+        .scalar()
+    ) or 0
+
+    feedback_rows = session.execute(
+        text(
+            "SELECT sentiment, COUNT(*) FROM message_feedback "
+            "WHERE created_at >= :since GROUP BY sentiment"
+        ),
+        {"since": since},
+    ).fetchall()
+    feedback = {row[0]: int(row[1]) for row in feedback_rows}
+
+    category_rows = session.execute(
+        text(
+            "SELECT COALESCE(category, 'NONE'), COUNT(*) "
+            "FROM conversation_message "
+            "WHERE role='user' AND created_at >= :since "
+            "GROUP BY COALESCE(category, 'NONE')"
+        ),
+        {"since": since},
+    ).fetchall()
+    categories = {row[0]: int(row[1]) for row in category_rows}
+
+    return {
+        "period_days": period_days,
+        "total_responses": int(total_responses),
+        "fallback_count": int(fallback_count),
+        "avg_response_ms": int(avg_response_ms) if avg_response_ms else None,
+        "total_tokens": int(total_tokens),
+        "positive_feedback": feedback.get("positive", 0),
+        "negative_feedback": feedback.get("negative", 0),
+        "category_question": categories.get("QUESTION", 0),
+        "category_request": categories.get("REQUEST", 0),
+        "category_none": categories.get("NONE", 0),
+    }
+
 
 def has_negative_feedback(session: Session, message_id: int) -> bool:
     """

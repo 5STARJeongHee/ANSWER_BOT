@@ -8,6 +8,7 @@ from sqlalchemy import (
     Date,
     DateTime,
     ForeignKey,
+    Integer,
     String,
     Text,
     UniqueConstraint,
@@ -40,6 +41,9 @@ class ConversationMessage(Base):
     content_raw = Column(Text, nullable=True)  # PII 마스킹 전 원문 (옵션)
     is_question = Column(Boolean, nullable=True)
     is_fallback = Column(Boolean, default=False)
+    category = Column(String(20), nullable=True)        # QUESTION / REQUEST / NONE
+    response_time_ms = Column(Integer, nullable=True)   # 봇 응답 생성 소요 시간 (ms)
+    token_count = Column(Integer, nullable=True)        # 컨텐츠 추정 토큰 수
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     __table_args__ = (
@@ -224,6 +228,20 @@ def init_db(engine=None) -> None:
             conn.commit()
         except Exception:
             conn.rollback()
+
+    # 히스토리·대시보드 기능을 위한 신규 컬럼 추가
+    _new_cols = [
+        "ALTER TABLE conversation_message ADD COLUMN IF NOT EXISTS category VARCHAR(20);",
+        "ALTER TABLE conversation_message ADD COLUMN IF NOT EXISTS response_time_ms INTEGER;",
+        "ALTER TABLE conversation_message ADD COLUMN IF NOT EXISTS token_count INTEGER;",
+    ]
+    with engine.connect() as conn:
+        for stmt in _new_cols:
+            try:
+                conn.execute(text(stmt))
+                conn.commit()
+            except Exception:
+                conn.rollback()
 
     if config.ENABLE_VECTOR_SEARCH:
         with engine.connect() as conn:

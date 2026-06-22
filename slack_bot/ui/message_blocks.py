@@ -1,7 +1,8 @@
 # 답변 유형별 Slack Block Kit 메시지 구성 팩토리
 from __future__ import annotations
 
-from typing import Optional
+from datetime import datetime, timezone
+from typing import Any, Optional
 
 
 # ---------------------------------------------------------------------------
@@ -332,6 +333,9 @@ def build_intro_blocks() -> dict:
                     "• *`@QNA BOT 백필 [기간]`* — 채널의 과거 대화를 재수집합니다.\n"
                     "  기간 예시: `7일` `2주` `한달` `3개월` `90` *(숫자는 일 수)*\n"
                     "  기간 생략 시 기본 90일 기준으로 실행됩니다.\n\n"
+                    "• *`@QNA BOT 히스토리`* — 나의 최근 질문·요청 이력을 카테고리별로 보여줍니다.\n\n"
+                    "• *`@QNA BOT 대시보드 [기간]`* — 봇 응답 통계 대시보드를 표시합니다.\n"
+                    "  기간 예시: `7일` `한달` *(기간 생략 시 기본 7일)*\n\n"
                     "• *`@QNA BOT 소개`* / *`@QNA BOT 도움말`* — 이 안내를 다시 표시합니다."
                 ),
             },
@@ -445,5 +449,212 @@ def build_greeting_blocks() -> dict:
 
     return {
         "text": "안녕하세요! 사내 Q&A 챗봇입니다. @QNA_BOT 질문 내용 형식으로 멘션해 주세요.",
+        "blocks": blocks,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 질문 이력 블록
+# ---------------------------------------------------------------------------
+
+_CATEGORY_EMOJI = {
+    "QUESTION": ":question:",
+    "REQUEST": ":memo:",
+    "NONE": ":speech_balloon:",
+}
+_CATEGORY_LABEL = {
+    "QUESTION": "질문",
+    "REQUEST": "요청",
+    "NONE": "기타",
+}
+
+
+def _fmt_dt(dt: Any) -> str:
+    """datetime을 'YYYY.MM.DD' 형식으로 포맷한다."""
+    if isinstance(dt, datetime):
+        return dt.strftime("%Y.%m.%d")
+    return str(dt)[:10]
+
+
+def build_history_blocks(messages: list[Any], channel_name: str = "이 채널") -> dict:
+    """
+    채널의 질문·요청 이력을 나열하는 Block Kit 페이로드를 반환한다.
+    messages: ConversationMessage ORM 객체 리스트 (최신순).
+    """
+    blocks: list[dict] = [
+        {
+            "type": "header",
+            "text": {
+                "type": "plain_text",
+                "text": f"📋 {channel_name} 질문·요청 이력",
+                "emoji": True,
+            },
+        },
+    ]
+
+    if not messages:
+        blocks.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "_아직 저장된 질문이 없습니다. `@QNA BOT 질문내용` 으로 질문해 보세요!_",
+                },
+            }
+        )
+        return {
+            "text": f"{channel_name} 질문 이력이 없습니다.",
+            "blocks": blocks,
+        }
+
+    # 한 section 블록에 최대 10개씩 나눠서 표시
+    displayed = min(len(messages), 20)
+    chunk_size = 10
+    for chunk_start in range(0, displayed, chunk_size):
+        chunk = messages[chunk_start : chunk_start + chunk_size]
+        lines = []
+        for i, msg in enumerate(chunk, start=chunk_start + 1):
+            cat = msg.category or "NONE"
+            emoji = _CATEGORY_EMOJI.get(cat, ":speech_balloon:")
+            label = _CATEGORY_LABEL.get(cat, cat)
+            date_str = _fmt_dt(msg.created_at)
+            # 작성자 표시 (user_id가 있으면 멘션)
+            author = f"<@{msg.user_id}>" if msg.user_id else "익명"
+            # 내용 truncate: 45자
+            text_preview = (msg.content or "")[:45].replace("\n", " ")
+            if len(msg.content or "") > 45:
+                text_preview += "…"
+            lines.append(f"`{i}.` {date_str}  {emoji} *{label}*  {author}  {text_preview}")
+
+        blocks.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "\n".join(lines),
+                },
+            }
+        )
+
+    blocks.append(
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": f":information_source: 최근 {displayed}건 표시 | 카테고리: :question: 질문  :memo: 요청  :speech_balloon: 기타",
+                }
+            ],
+        }
+    )
+
+    return {
+        "text": f"{channel_name} 최근 질문 이력 {displayed}건",
+        "blocks": blocks,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 대시보드 통계 블록
+# ---------------------------------------------------------------------------
+
+def build_dashboard_blocks(stats: dict) -> dict:
+    """
+    챗봇 대시보드 통계 Block Kit 페이로드를 반환한다.
+    stats: get_dashboard_stats() 반환값.
+    """
+    period_days = stats.get("period_days", 7)
+    period_label = f"{period_days}일" if period_days != 30 else "30일(1개월)"
+
+    total = stats.get("total_responses", 0)
+    fallback = stats.get("fallback_count", 0)
+    pos = stats.get("positive_feedback", 0)
+    neg = stats.get("negative_feedback", 0)
+    avg_ms = stats.get("avg_response_ms")
+    total_tokens = stats.get("total_tokens", 0)
+    q_count = stats.get("category_question", 0)
+    r_count = stats.get("category_request", 0)
+
+    # 응답 성공률
+    total_bot = total + fallback
+    success_rate = f"{total / total_bot * 100:.0f}%" if total_bot else "N/A"
+
+    # 평균 응답 시간
+    avg_ms_str = f"{avg_ms / 1000:.1f}초" if avg_ms else "측정 중"
+
+    # 토큰 수 표시
+    tokens_str = f"{total_tokens:,}" if total_tokens else "측정 중"
+
+    # 피드백 표시
+    total_fb = pos + neg
+    feedback_str = (
+        f":thumbsup: {pos}  :thumbsdown: {neg}  (총 {total_fb}건)"
+        if total_fb
+        else "피드백 없음"
+    )
+
+    blocks: list[dict] = [
+        {
+            "type": "header",
+            "text": {
+                "type": "plain_text",
+                "text": f"📊 QNA BOT 대시보드 (최근 {period_label})",
+                "emoji": True,
+            },
+        },
+        {"type": "divider"},
+        # 응답 현황
+        {
+            "type": "section",
+            "fields": [
+                {"type": "mrkdwn", "text": f"*총 응답 수*\n{total}건"},
+                {"type": "mrkdwn", "text": f"*응답 성공률*\n{success_rate}"},
+                {"type": "mrkdwn", "text": f"*Fallback (담당자 호출)*\n{fallback}건"},
+                {"type": "mrkdwn", "text": f"*평균 응답 시간*\n{avg_ms_str}"},
+            ],
+        },
+        {"type": "divider"},
+        # 피드백
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*사용자 피드백*\n{feedback_str}",
+            },
+        },
+        {"type": "divider"},
+        # 질문 유형 분포
+        {
+            "type": "section",
+            "fields": [
+                {"type": "mrkdwn", "text": f"*:question: 질문*\n{q_count}건"},
+                {"type": "mrkdwn", "text": f"*:memo: 요청*\n{r_count}건"},
+            ],
+        },
+        {"type": "divider"},
+        # 토큰 사용량
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*토큰 사용량 (추정)*\n{tokens_str} 토큰",
+            },
+        },
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": (
+                        ":robot_face: 응답 시간·토큰은 이 기능 배포 이후 데이터부터 집계됩니다. "
+                        "초기에는 일부 항목이 '측정 중'으로 표시될 수 있습니다."
+                    ),
+                }
+            ],
+        },
+    ]
+
+    return {
+        "text": f"QNA BOT 대시보드 (최근 {period_label}): 총 응답 {total}건",
         "blocks": blocks,
     }
