@@ -15,6 +15,7 @@ from db.repository import (
     get_thread_starter_user_id,
     get_channel_question_history,
     get_dashboard_stats,
+    get_recent_fallbacks,
 )
 from services.classifier import classify_message, MessageCategory
 from services.context_retriever import retrieve_context, format_context_for_prompt, embed_text
@@ -372,6 +373,8 @@ def _save_message_and_embed(
     response_time_ms: Optional[int] = None,
     prompt_tokens: Optional[int] = None,
     completion_tokens: Optional[int] = None,
+    rag_avg_similarity: Optional[float] = None,
+    used_web_search: bool = False,
 ) -> Optional[int]:
     """
     메시지를 저장하고 임베딩을 생성한다.
@@ -402,6 +405,8 @@ def _save_message_and_embed(
             response_time_ms=response_time_ms,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
+            rag_avg_similarity=rag_avg_similarity,
+            used_web_search=used_web_search,
         )
         if msg is None:
             session.commit()
@@ -530,6 +535,10 @@ def _process_question(
                 logger.info(f"부정 피드백 컨텍스트 {len(negative_ids)}건 제외")
 
         highest_similarity = max((c.get("similarity", 0.0) for c in contexts), default=0.0)
+        _rag_avg_sim = (
+            sum(c.get("similarity", 0.0) for c in contexts) / len(contexts)
+            if contexts else None
+        )
         web_search_block = ""
 
         if highest_similarity >= 0.90:
@@ -617,7 +626,7 @@ def _process_question(
             from ui.reaction_handler import add_feedback_reactions
             add_feedback_reactions(client=client, channel=channel_id, message_ts=sent_ts)
 
-        # 10. 봇 응답 저장 (응답 시간·입출력 토큰 수 함께 기록)
+        # 10. 봇 응답 저장 (응답 시간·입출력 토큰·RAG·웹검색 메타 함께 기록)
         _elapsed_ms = int((time.monotonic() - _start_time) * 1000)
         _save_message_and_embed(
             session_factory=session_factory,
@@ -632,6 +641,8 @@ def _process_question(
             response_time_ms=_elapsed_ms,
             prompt_tokens=_prompt_tokens,
             completion_tokens=estimate_tokens(answer),
+            rag_avg_similarity=_rag_avg_sim,
+            used_web_search=bool(web_search_block),
         )
 
     except Exception as exc:
@@ -783,7 +794,8 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
                 dash_session = session_factory()
                 try:
                     stats = get_dashboard_stats(dash_session, period_days=dashboard_days)
-                    payload = build_dashboard_blocks(stats)
+                    fallbacks = get_recent_fallbacks(dash_session, period_days=dashboard_days, limit=5)
+                    payload = build_dashboard_blocks(stats, fallback_questions=fallbacks)
                     post_message(
                         client=client,
                         channel=channel_id,

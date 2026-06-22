@@ -7,6 +7,7 @@ from sqlalchemy import (
     Column,
     Date,
     DateTime,
+    Float,
     ForeignKey,
     Integer,
     String,
@@ -45,6 +46,8 @@ class ConversationMessage(Base):
     response_time_ms = Column(Integer, nullable=True)     # 봇 응답 생성 소요 시간 (ms)
     prompt_tokens = Column(Integer, nullable=True)        # LLM에 전달한 입력 토큰 수
     completion_tokens = Column(Integer, nullable=True)    # LLM이 생성한 출력 토큰 수
+    rag_avg_similarity = Column(Float, nullable=True)     # RAG top-k 평균 유사도 (0~1)
+    used_web_search = Column(Boolean, default=False)      # 웹 검색 보조 사용 여부
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     __table_args__ = (
@@ -230,12 +233,15 @@ def init_db(engine=None) -> None:
         except Exception:
             conn.rollback()
 
-    # 히스토리·대시보드 기능을 위한 신규 컬럼 추가 (V2 마이그레이션)
+    # V2: 히스토리·대시보드 분석 컬럼 추가
+    # V3: RAG 품질·웹검색 추적 컬럼 추가
     _new_cols = [
         "ALTER TABLE conversation_message ADD COLUMN IF NOT EXISTS category VARCHAR(20);",
         "ALTER TABLE conversation_message ADD COLUMN IF NOT EXISTS response_time_ms INTEGER;",
         "ALTER TABLE conversation_message ADD COLUMN IF NOT EXISTS prompt_tokens INTEGER;",
         "ALTER TABLE conversation_message ADD COLUMN IF NOT EXISTS completion_tokens INTEGER;",
+        "ALTER TABLE conversation_message ADD COLUMN IF NOT EXISTS rag_avg_similarity FLOAT;",
+        "ALTER TABLE conversation_message ADD COLUMN IF NOT EXISTS used_web_search BOOLEAN DEFAULT FALSE;",
     ]
     with engine.connect() as conn:
         for stmt in _new_cols:

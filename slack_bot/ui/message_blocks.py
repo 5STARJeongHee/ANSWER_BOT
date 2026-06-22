@@ -558,10 +558,11 @@ def build_history_blocks(messages: list[Any], channel_name: str = "이 채널") 
 # 대시보드 통계 블록
 # ---------------------------------------------------------------------------
 
-def build_dashboard_blocks(stats: dict) -> dict:
+def build_dashboard_blocks(stats: dict, fallback_questions: Optional[list[str]] = None) -> dict:
     """
     챗봇 대시보드 통계 Block Kit 페이로드를 반환한다.
     stats: get_dashboard_stats() 반환값.
+    fallback_questions: get_recent_fallbacks() 반환값 (선택).
     """
     period_days = stats.get("period_days", 7)
     period_label = f"{period_days}일" if period_days != 30 else "30일(1개월)"
@@ -575,25 +576,34 @@ def build_dashboard_blocks(stats: dict) -> dict:
     completion_tokens = stats.get("total_completion_tokens", 0)
     q_count = stats.get("category_question", 0)
     r_count = stats.get("category_request", 0)
+    avg_rag = stats.get("avg_rag_similarity")
+    web_search_count = stats.get("web_search_count", 0)
+    web_search_rate = stats.get("web_search_rate", 0.0)
+    active_users = stats.get("active_users", 0)
+    feedback_rate = stats.get("feedback_response_rate", 0.0)
 
-    # 응답 성공률
     total_bot = total + fallback
     success_rate = f"{total / total_bot * 100:.0f}%" if total_bot else "N/A"
-
-    # 평균 응답 시간
     avg_ms_str = f"{avg_ms / 1000:.1f}초" if avg_ms else "측정 중"
-
-    # 토큰 수 표시
     prompt_str = f"{prompt_tokens:,}" if prompt_tokens else "측정 중"
     completion_str = f"{completion_tokens:,}" if completion_tokens else "측정 중"
 
-    # 피드백 표시
     total_fb = pos + neg
+    pos_rate_str = f"{pos / total_fb * 100:.0f}%" if total_fb else "N/A"
     feedback_str = (
-        f":thumbsup: {pos}  :thumbsdown: {neg}  (총 {total_fb}건)"
-        if total_fb
-        else "피드백 없음"
+        f":thumbsup: {pos}  :thumbsdown: {neg}  (총 {total_fb}건, 긍정 {pos_rate_str})"
+        if total_fb else "피드백 없음"
     )
+    feedback_rate_str = f"{feedback_rate * 100:.0f}%" if feedback_rate else "N/A"
+
+    # RAG 평균 유사도 표시 및 품질 해석
+    if avg_rag is not None:
+        rag_bar = "🟢" if avg_rag >= 0.7 else ("🟡" if avg_rag >= 0.5 else "🔴")
+        rag_str = f"{rag_bar} {avg_rag:.2f}  {'(충분)' if avg_rag >= 0.7 else '(지식 부족 가능)'}"
+    else:
+        rag_str = "측정 중"
+
+    web_rate_str = f"{web_search_rate * 100:.0f}%  ({web_search_count}건)" if total_bot else "N/A"
 
     blocks: list[dict] = [
         {
@@ -616,6 +626,15 @@ def build_dashboard_blocks(stats: dict) -> dict:
             ],
         },
         {"type": "divider"},
+        # 사용자 현황
+        {
+            "type": "section",
+            "fields": [
+                {"type": "mrkdwn", "text": f"*활성 사용자 수*\n{active_users}명"},
+                {"type": "mrkdwn", "text": f"*피드백 응답률*\n{feedback_rate_str}"},
+            ],
+        },
+        {"type": "divider"},
         # 피드백
         {
             "type": "section",
@@ -623,6 +642,15 @@ def build_dashboard_blocks(stats: dict) -> dict:
                 "type": "mrkdwn",
                 "text": f"*사용자 피드백*\n{feedback_str}",
             },
+        },
+        {"type": "divider"},
+        # RAG 품질 + 웹 검색 의존율
+        {
+            "type": "section",
+            "fields": [
+                {"type": "mrkdwn", "text": f"*RAG 평균 유사도*\n{rag_str}"},
+                {"type": "mrkdwn", "text": f"*웹 검색 의존율*\n{web_rate_str}"},
+            ],
         },
         {"type": "divider"},
         # 질문 유형 분포
@@ -642,19 +670,39 @@ def build_dashboard_blocks(stats: dict) -> dict:
                 {"type": "mrkdwn", "text": f"*출력 토큰 (응답, 추정)*\n{completion_str}"},
             ],
         },
+    ]
+
+    # Fallback 트리거 키워드 섹션
+    if fallback_questions:
+        fb_lines = "\n".join(
+            f"`{i}.` {q[:60]}{'…' if len(q) > 60 else ''}"
+            for i, q in enumerate(fallback_questions, 1)
+        )
+        blocks.append({"type": "divider"})
+        blocks.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"*:warning: 최근 Fallback 트리거 질문*\n{fb_lines}",
+                },
+            }
+        )
+
+    blocks.append(
         {
             "type": "context",
             "elements": [
                 {
                     "type": "mrkdwn",
                     "text": (
-                        ":robot_face: 응답 시간·토큰은 이 기능 배포 이후 데이터부터 집계됩니다. "
+                        ":robot_face: 응답 시간·토큰·RAG 유사도는 이 기능 배포 이후 데이터부터 집계됩니다. "
                         "초기에는 일부 항목이 '측정 중'으로 표시될 수 있습니다."
                     ),
                 }
             ],
-        },
-    ]
+        }
+    )
 
     return {
         "text": f"QNA BOT 대시보드 (최근 {period_label}): 총 응답 {total}건",

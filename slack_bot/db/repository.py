@@ -34,6 +34,8 @@ def upsert_message(
     response_time_ms: Optional[int] = None,
     prompt_tokens: Optional[int] = None,
     completion_tokens: Optional[int] = None,
+    rag_avg_similarity: Optional[float] = None,
+    used_web_search: bool = False,
     force: bool = False,
 ) -> Optional[ConversationMessage]:
     """
@@ -78,6 +80,9 @@ def upsert_message(
             existing.prompt_tokens = prompt_tokens
         if completion_tokens is not None:
             existing.completion_tokens = completion_tokens
+        if rag_avg_similarity is not None:
+            existing.rag_avg_similarity = rag_avg_similarity
+        existing.used_web_search = used_web_search
         session.query(ContextEmbedding).filter(
             ContextEmbedding.source_message_id == existing.id
         ).delete(synchronize_session=False)
@@ -99,6 +104,8 @@ def upsert_message(
         response_time_ms=response_time_ms,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
+        rag_avg_similarity=rag_avg_similarity,
+        used_web_search=used_web_search,
     )
     try:
         session.add(msg)
@@ -668,6 +675,47 @@ def get_dashboard_stats(session: Session, period_days: int = 7) -> dict:
     ).fetchall()
     categories = {row[0]: int(row[1]) for row in category_rows}
 
+    avg_rag_similarity = (
+        session.query(func.avg(ConversationMessage.rag_avg_similarity))
+        .filter(
+            ConversationMessage.role == "bot",
+            ConversationMessage.rag_avg_similarity.isnot(None),
+            ConversationMessage.created_at >= since,
+        )
+        .scalar()
+    )
+
+    web_search_count = (
+        session.query(func.count(ConversationMessage.id))
+        .filter(
+            ConversationMessage.role == "bot",
+            ConversationMessage.used_web_search == True,
+            ConversationMessage.created_at >= since,
+        )
+        .scalar()
+    ) or 0
+
+    active_users = (
+        session.query(func.count(func.distinct(ConversationMessage.user_id)))
+        .filter(
+            ConversationMessage.role == "user",
+            ConversationMessage.created_at >= since,
+        )
+        .scalar()
+    ) or 0
+
+    # 피드백 응답률: 피드백이 달린 봇 메시지 수 / 전체 봇 응답 수
+    responded_with_feedback = session.execute(
+        text(
+            "SELECT COUNT(DISTINCT m.id) FROM conversation_message m "
+            "JOIN message_feedback f ON f.message_ts = m.message_ts "
+            "WHERE m.role='bot' AND m.created_at >= :since"
+        ),
+        {"since": since},
+    ).scalar() or 0
+
+    total_bot = int(total_responses) + int(fallback_count)
+
     return {
         "period_days": period_days,
         "total_responses": int(total_responses),
@@ -680,7 +728,42 @@ def get_dashboard_stats(session: Session, period_days: int = 7) -> dict:
         "category_question": categories.get("QUESTION", 0),
         "category_request": categories.get("REQUEST", 0),
         "category_none": categories.get("NONE", 0),
+        "avg_rag_similarity": round(float(avg_rag_similarity), 3) if avg_rag_similarity else None,
+        "web_search_count": int(web_search_count),
+        "web_search_rate": round(web_search_count / total_bot, 3) if total_bot else 0.0,
+        "active_users": int(active_users),
+        "feedback_response_rate": round(responded_with_feedback / total_bot, 3) if total_bot else 0.0,
     }
+
+
+def get_recent_fallbacks(
+    session: Session,
+    period_days: int = 7,
+    limit: int = 5,
+) -> list[str]:
+    """최근 fallback 트리거 질문 텍스트를 반환한다 (중복 제거, 최신순)."""
+    since = datetime.utcnow() - timedelta(days=period_days)
+    rows = (
+        session.query(ConversationMessage.content)
+        .filter(
+            ConversationMessage.role == "bot",
+            ConversationMessage.is_fallback == True,
+            ConversationMessage.created_at >= since,
+        )
+        .order_by(ConversationMessage.created_at.desc())
+        .limit(limit * 3)  # 중복 제거 여유분
+        .all()
+    )
+    seen: set[str] = set()
+    result: list[str] = []
+    for (content,) in rows:
+        text_val = content.removeprefix("[FALLBACK] ").strip()
+        if text_val not in seen:
+            seen.add(text_val)
+            result.append(text_val)
+        if len(result) >= limit:
+            break
+    return result
 
 
 def has_negative_feedback(session: Session, message_id: int) -> bool:
