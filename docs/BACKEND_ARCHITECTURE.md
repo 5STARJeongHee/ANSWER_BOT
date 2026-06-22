@@ -1,7 +1,7 @@
 # 사내 Slack Q&A 챗봇 백엔드 구현 설명서
 
-> 작성일: 2026-06-16  
-> 구현 언어: Python 3.8+  
+> 작성일: 2026-06-16 / 최종 업데이트: 2026-06-22  
+> 구현 언어: Python 3.11+  
 > 작업 디렉토리: `D:\My\SLACK_BOT\slack_bot\`
 
 ---
@@ -16,28 +16,37 @@
    │
    ├── [handlers/event_handler.py]
    │     ├── @app.event("app_mention")  → ack() 즉시 + threading.Thread 분리
+   │     │     ├── 명령어 라우팅 (소개/히스토리/대시보드/백필)
+   │     │     └── 일반 질문 → _process_question()
    │     └── @app.event("message")     → ack() 즉시 + threading.Thread 분리
+   │           ├── DM: 전체 처리 (rag_channel_id=None)
+   │           └── 채널: classify → is_actionable 시 _process_question()
    │
-   ├── [services/classifier.py]        → gpt-oss-20b 분류 (질문/요청/NONE)
-   ├── [services/context_retriever.py] → pgvector 유사도 검색 (RAG)
-   ├── [services/llm_service.py]       → OpenRouter API 호출 + 재시도/fallback
+   ├── [services/classifier.py]        → 분류 (QUESTION/REQUEST/NONE) + extract_topic()
+   ├── [services/context_retriever.py] → Advanced RAG (Hybrid+Reranking+Thread청킹)
+   ├── [services/llm_service.py]       → OpenRouter/Ollama API 호출 + 재시도/fallback
    ├── [services/slack_service.py]     → 메시지 전송, 이력 조회
-   ├── [services/summarizer.py]        → 대화 요약 배치 (V2)
+   ├── [services/summarizer.py]        → 스레드 문맥 요약
+   ├── [services/web_search.py]        → DuckDuckGo 보조 검색
    │
-   ├── [batch/collector.py]            → 90일 과거 대화 백필
+   ├── [batch/collector.py]            → 증분 백필 (미수집 과거 구간, 중단 후 재개)
    ├── [batch/scheduler.py]            → APScheduler 주간 요약 등록
+   ├── [batch/topic_normalizer.py]     → 주제 태그 정규화 배치 (Stage 2, 미구현)
    │
    ├── [db/models.py]                  → SQLAlchemy ORM + scoped_session
-   ├── [db/repository.py]             → CRUD 함수 (모든 DB 접근 중앙화)
+   ├── [db/repository.py]              → CRUD 함수 (모든 DB 접근 중앙화)
    │
    └── [utils/]
+         ├── file_processor.py        → xlsx/docx/pdf/txt 텍스트 추출
+         ├── image_processor.py       → Vision 모델 이미지 분석
          ├── pii_filter.py            → 이메일/전화/주민번호 마스킹
          └── token_counter.py         → 한국어 혼합 토큰 추정
 
 [PostgreSQL 15 + pgvector]
-   ├── conversation_message           (메시지 원문, event_id UNIQUE)
-   ├── context_embedding              (벡터 768차원, ivfflat 인덱스)
-   └── context_summary                (주간 요약본, V2)
+   ├── conversation_message           (메시지 원문, 분석 메트릭, 주제 태그)
+   ├── context_embedding              (벡터 768차원, ivfflat + trgm 인덱스)
+   ├── message_feedback               (이모지 반응 피드백)
+   └── context_summary                (주간 요약본)
 ```
 
 ---
@@ -47,17 +56,23 @@
 | 파일 | 역할 | 핵심 결정사항 |
 |------|------|--------------|
 | `main.py` | 앱 진입점, 초기화 오케스트레이션 | DB → 핸들러 → 스케줄러 → Socket Mode 순 기동 |
-| `config.py` | 환경변수 + properties.txt 로드 | 모델명은 properties.txt 우선, env fallback |
+| `config.py` | 환경변수 + properties.yml 로드 | 모델명은 properties.yml 우선, env fallback |
 | `db/models.py` | ORM 모델, 엔진/세션 팩토리 | scoped_session으로 스레드 안전 보장 |
 | `db/repository.py` | CRUD 함수 중앙화 | 모든 DB 접근은 이 모듈만 사용 |
-| `handlers/event_handler.py` | Bolt 이벤트 처리 | ack() 즉시 → Thread 분리 패턴 |
-| `services/classifier.py` | 메시지 분류 (QUESTION/REQUEST/NONE) | 인메모리 LRU 캐시 256개 |
-| `services/llm_service.py` | OpenRouter API 통합 | 지수 백오프 + 모델 fallback 체인 |
-| `services/context_retriever.py` | RAG 벡터 검색 | pgvector 없으면 텍스트 fallback |
+| `handlers/event_handler.py` | Bolt 이벤트 처리 + 명령어 라우팅 | ack() 즉시 → Thread 분리 패턴 |
+| `services/classifier.py` | 메시지 분류 (QUESTION/REQUEST/NONE) + `extract_topic()` | 분류 인메모리 LRU 캐시 256개 |
+| `services/llm_service.py` | OpenRouter/Ollama API 통합 | 지수 백오프 + 모델 fallback 체인 |
+| `services/context_retriever.py` | Advanced RAG (Hybrid+Reranking+Thread청킹) | pgvector 없으면 텍스트 fallback |
 | `services/slack_service.py` | Slack 메시지 전송/조회 | rate limit 재시도, Retry-After 헤더 준수 |
-| `services/summarizer.py` | 주간 대화 요약 | V2 배치, APScheduler 월요일 02시 실행 |
-| `batch/collector.py` | 90일 백필 | 1.3초 간격 rate limit 대응 |
+| `services/summarizer.py` | 스레드 문맥 요약 / 주간 대화 요약 배치 | APScheduler 월요일 02시 실행 |
+| `services/web_search.py` | DuckDuckGo 보조 검색 | RAG 최고 유사도 0.90 미만일 때만 호출 |
+| `batch/collector.py` | 증분 백필 (미수집 과거 구간) | DB 최솟값 ts 기준, 1.3초 rate limit 대응 |
 | `batch/scheduler.py` | APScheduler 등록 | coalesce=True, max_instances=1 |
+| `batch/topic_normalizer.py` | 주제 태그 배치 정규화 (Stage 2 stub) | 미구현. 채널당 200건 이상 쌓인 후 활성화 예정 |
+| `ui/message_blocks.py` | Block Kit 컴포넌트 빌더 | 답변·히스토리·대시보드·소개 블록 |
+| `ui/reaction_handler.py` | 이모지 반응 피드백 처리 | reaction_added 이벤트 → message_feedback 저장 |
+| `utils/file_processor.py` | 첨부파일 텍스트 추출 | xlsx/docx/pdf/txt 지원, 파일당 3000자 제한 |
+| `utils/image_processor.py` | Vision 모델 이미지 분석 | base64 직렬화, 동시 처리 상한 제어 |
 | `utils/pii_filter.py` | PII 마스킹 | 이메일/전화/주민번호/카드/IP 패턴 |
 | `utils/token_counter.py` | 토큰 추정 | 한국어 1.5자/토큰, 영어 1.3단어/토큰 |
 
@@ -166,6 +181,13 @@ english_tokens = int(english_words * 1.3)  # 1.3 단어당 1토큰
 | content | TEXT | PII 마스킹된 메시지 본문 |
 | is_question | BOOLEAN | 분류기 판단 결과 |
 | is_fallback | BOOLEAN | Fallback 발동 여부 |
+| category | VARCHAR(20) | 분류기 결과 레이블 (QUESTION/REQUEST/NONE) |
+| response_time_ms | INTEGER | 봇 응답 생성 소요 시간(ms) |
+| prompt_tokens | INTEGER | LLM 요청 토큰 수 (추정) |
+| completion_tokens | INTEGER | LLM 응답 토큰 수 (추정) |
+| rag_avg_similarity | FLOAT | RAG 검색 결과 평균 코사인 유사도 |
+| used_web_search | BOOLEAN | DuckDuckGo 보조 검색 사용 여부 |
+| topic | VARCHAR(100) | LLM 추출 핵심 주제 태그 (Stage 1 자유 텍스트) |
 | created_at | TIMESTAMP | 저장 시각 |
 
 UNIQUE: `(channel_id, message_ts)` — 중복 삽입 방지 2차 방어선
@@ -177,10 +199,23 @@ UNIQUE: `(channel_id, message_ts)` — 중복 삽입 방지 2차 방어선
 | id | BIGSERIAL PK | |
 | source_message_id | BIGINT FK | conversation_message.id (CASCADE DELETE) |
 | chunk_text | TEXT | 임베딩 대상 텍스트 |
+| chunk_type | VARCHAR(20) | 청크 유형 ('message' / 'thread') |
 | embedding | vector(768) | pgvector 벡터 (ENABLE_VECTOR_SEARCH=true) |
 | embedding_json | TEXT | JSON 직렬화 fallback |
 
 인덱스: `USING ivfflat (embedding vector_cosine_ops) WITH (lists=100)`
+
+### message_feedback
+
+| 컬럼 | 타입 | 설명 |
+|------|------|------|
+| id | BIGSERIAL PK | |
+| message_id | BIGINT FK | conversation_message.id (CASCADE DELETE) |
+| user_id | VARCHAR(20) | 반응한 사용자 Slack ID |
+| reaction | VARCHAR(50) | 이모지 이름 (thumbsup / thumbsdown 등) |
+| created_at | TIMESTAMP | 반응 저장 시각 |
+
+UNIQUE: `(message_id, user_id, reaction)` — 동일 반응 중복 저장 방지
 
 ### context_summary
 
@@ -308,5 +343,7 @@ python -m py_compile main.py
 | ivfflat 인덱스 | lists=100 | 데이터 10만 건 이상 시 lists 조정 또는 hnsw 전환 |
 | 분류기 캐시 | 인메모리 LRU 256개 | Redis 이관 시 다중 인스턴스 지원 |
 | 백필 재시도 | 단순 break | 재개 가능한 cursor 저장 로직 추가 |
-| 피드백 수집 | 미구현 | V2에서 reaction_added 이벤트로 thumbs up/down 수집 |
+| 주제 태그 정규화 | Stage 1만 구현 (자유 텍스트) | Stage 2: 임베딩 클러스터링으로 canonical 주제명 정규화 (채널당 200건 이상 시 활성화) |
+| RAG + 주제 통합 | 미적용 | Stage 2 정규화 이후 canonical 주제를 메타데이터 필터 또는 boosting으로 활용 검토 |
+| 히스토리 그룹핑 | 단순 시간순 목록 | Stage 2 이후 canonical 주제별 그룹핑 및 동일 주제 과거 Q&A 요약 제시 |
 | 모니터링 | 로그만 | Prometheus metrics 또는 Slack 알림 추가 검토 |
