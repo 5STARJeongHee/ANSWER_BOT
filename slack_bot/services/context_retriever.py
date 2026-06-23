@@ -200,6 +200,8 @@ def format_context_for_prompt(contexts: list[dict]) -> str:
 
         if chunk_type == "thread":
             role_label = "[스레드 Q&A]"
+        elif chunk_type == "conversation":
+            role_label = "[채널 Q&A]"
         elif role == "user":
             role_label = "[사람 답변]"
         elif role == "bot":

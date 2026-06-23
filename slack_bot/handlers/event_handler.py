@@ -14,6 +14,7 @@ from db.repository import (
     upsert_message,
     get_thread_starter_user_id,
     get_channel_question_history,
+    get_channel_history_by_date,
     get_dashboard_stats,
     get_recent_fallbacks,
     get_top_topics,
@@ -864,9 +865,9 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
             def history_worker():
                 hist_session = session_factory()
                 try:
-                    messages = get_channel_question_history(hist_session, channel_id, limit=20)
+                    grouped = get_channel_history_by_date(hist_session, channel_id, days=7)
                     channel_label = f"<#{channel_id}>"
-                    payload = build_history_blocks(messages, channel_label)
+                    payload = build_history_blocks(grouped, channel_label)
                     post_message(
                         client=client,
                         channel=channel_id,

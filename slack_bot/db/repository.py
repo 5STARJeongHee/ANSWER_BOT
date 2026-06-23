@@ -468,6 +468,84 @@ def save_thread_chunk_embedding(
     )
 
 
+def save_mention_chain_embedding(
+    session: Session,
+    *,
+    channel_id: str,
+    message_ts_list: list[str],
+    embed_fn,
+) -> Optional[ContextEmbedding]:
+    """
+    비스레드 @mention 대화 체인을 Q:/A: 형식으로 합쳐 conversation 청크로 임베딩한다.
+    message_ts_list: 체인에 속한 Slack message_ts 값 목록 (시간순).
+    2개 미만 메시지는 처리하지 않는다.
+    """
+    import json
+
+    msgs = (
+        session.query(ConversationMessage)
+        .filter(
+            ConversationMessage.channel_id == channel_id,
+            ConversationMessage.message_ts.in_(message_ts_list),
+        )
+        .order_by(ConversationMessage.created_at.asc())
+        .all()
+    )
+    if not msgs or len(msgs) < 2:
+        return None
+
+    parts = []
+    for msg in msgs:
+        prefix = "Q:" if msg.role == "user" else "A:"
+        parts.append(f"{prefix} {msg.content.strip()}")
+    chunk_text = "\n".join(parts)
+
+    if len(chunk_text) > config.THREAD_CHUNK_MAX_CHARS:
+        chunk_text = chunk_text[:config.THREAD_CHUNK_MAX_CHARS]
+
+    first_msg = msgs[0]
+
+    existing = (
+        session.query(ContextEmbedding)
+        .filter(
+            ContextEmbedding.source_message_id == first_msg.id,
+            ContextEmbedding.chunk_type == "conversation",
+        )
+        .first()
+    )
+
+    embedding = embed_fn(chunk_text)
+
+    if existing:
+        existing.chunk_text = chunk_text
+        if embedding:
+            existing.embedding_json = json.dumps(embedding)
+            if config.ENABLE_VECTOR_SEARCH:
+                vec_str = "[" + ",".join(str(v) for v in embedding) + "]"
+                try:
+                    session.execute(text("SAVEPOINT conv_chunk_vec"))
+                    session.execute(
+                        text(
+                            "UPDATE context_embedding SET embedding = CAST(:vec AS vector) "
+                            "WHERE id = :id"
+                        ),
+                        {"vec": vec_str, "id": existing.id},
+                    )
+                    session.execute(text("RELEASE SAVEPOINT conv_chunk_vec"))
+                except Exception:
+                    session.execute(text("ROLLBACK TO SAVEPOINT conv_chunk_vec"))
+        session.flush()
+        return existing
+
+    return save_embedding(
+        session=session,
+        source_message_id=first_msg.id,
+        chunk_text=chunk_text,
+        embedding=embedding,
+        chunk_type="conversation",
+    )
+
+
 # ---------------------------------------------------------------------------
 # ContextSummary CRUD
 # ---------------------------------------------------------------------------
@@ -601,6 +679,74 @@ def get_channel_question_history(
         .limit(limit)
         .all()
     )
+
+
+def get_channel_history_by_date(
+    session: Session,
+    channel_id: str,
+    days: int = 7,
+) -> dict[date, list[dict]]:
+    """최근 N일 채널 메시지를 날짜 → 대화 그룹별로 묶어 Q/A 요약과 함께 반환한다."""
+    from collections import defaultdict, OrderedDict
+    from utils.conversation_grouper import group_messages_by_conversation
+
+    since = datetime.utcnow() - timedelta(days=days)
+    messages = (
+        session.query(ConversationMessage)
+        .filter(
+            ConversationMessage.channel_id == channel_id,
+            ConversationMessage.created_at >= since,
+        )
+        .order_by(ConversationMessage.created_at.asc())
+        .all()
+    )
+
+    msg_dicts = [
+        {
+            "user_id": (msg.user_id or "").upper(),
+            "role": msg.role,
+            "content": msg.content or "",
+            "thread_ts": msg.thread_ts,
+            "created_at": msg.created_at,
+            "topic": msg.topic,
+        }
+        for msg in messages
+    ]
+
+    conv_groups = group_messages_by_conversation(msg_dicts)
+
+    by_date: dict[date, list[dict]] = defaultdict(list)
+    for group in conv_groups:
+        if not group:
+            continue
+        day = group[0]["created_at"].date()
+        topic = next((m["topic"] for m in group if m.get("topic")), None)
+        first_q = next((m for m in group if m["role"] == "user"), None)
+        first_a = next((m for m in group if m["role"] == "bot"), None)
+
+        def _preview(m: dict | None) -> str:
+            if not m:
+                return ""
+            text = m["content"][:50].replace("\n", " ")
+            return text + "…" if len(m["content"]) > 50 else text
+
+        user_ids = list(dict.fromkeys(
+            m["user_id"] for m in group if m.get("user_id") and m["role"] == "user"
+        ))
+        by_date[day].append(
+            {
+                "topic": topic,
+                "message_count": len(group),
+                "q_preview": _preview(first_q),
+                "a_preview": _preview(first_a),
+                "user_ids": user_ids,
+            }
+        )
+
+    result: dict[date, list[dict]] = OrderedDict()
+    for day in sorted(by_date.keys(), reverse=True):
+        result[day] = by_date[day]
+    return result
 
 
 def get_dashboard_stats(session: Session, period_days: int = 7) -> dict:

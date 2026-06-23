@@ -10,7 +10,7 @@ from typing import Callable, Optional
 from slack_sdk import WebClient
 
 import config
-from db.repository import upsert_message, save_embedding, get_oldest_message_ts
+from db.repository import upsert_message, save_embedding, get_oldest_message_ts, save_mention_chain_embedding
 from services.context_retriever import embed_text
 from utils.image_processor import analyze_slack_files
 from utils.pii_filter import apply_pii_filter
@@ -222,6 +222,8 @@ def backfill_channel(
                 # thread_ts == ts인 부모도 포함해야 DB에 저장된 봇 답변과 함께 청크를 생성할 수 있다.
                 if config.ENABLE_THREAD_CHUNKING:
                     from db.repository import save_thread_chunk_embedding
+                    from utils.conversation_grouper import group_messages_by_conversation
+
                     thread_tss = {
                         msg.get("thread_ts")
                         for msg in valid_msgs
@@ -237,6 +239,35 @@ def backfill_channel(
                             )
                         except Exception as exc:
                             logger.warning(f"Thread 청크 저장 실패 (ts={ts}): {exc}")
+
+                    # 비스레드 @mention 대화 체인 감지 및 conversation 청크 저장
+                    non_threaded_msgs = [m for m in valid_msgs if not m.get("thread_ts")]
+                    if non_threaded_msgs:
+                        normalized = [
+                            {
+                                "user_id": (m.get("user") or m.get("bot_id") or "").upper(),
+                                "role": "bot" if m.get("bot_id") else "user",
+                                "content": m.get("text", ""),
+                                "thread_ts": None,
+                                "created_at": _slack_ts_to_datetime(m.get("ts", "0")),
+                                "_ts": m.get("ts", ""),
+                            }
+                            for m in non_threaded_msgs
+                        ]
+                        chains = group_messages_by_conversation(normalized)
+                        for chain in chains:
+                            if len(chain) < 2:
+                                continue
+                            ts_list = [c["_ts"] for c in chain if c.get("_ts")]
+                            try:
+                                save_mention_chain_embedding(
+                                    session=session,
+                                    channel_id=channel_id,
+                                    message_ts_list=ts_list,
+                                    embed_fn=embed_text,
+                                )
+                            except Exception as exc:
+                                logger.warning(f"Conversation 청크 저장 실패: {exc}")
 
                 session.commit()
                 has_next = bool(response.get("response_metadata", {}).get("next_cursor"))

@@ -1,7 +1,7 @@
 # 답변 유형별 Slack Block Kit 메시지 구성 팩토리
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Optional
 
 
@@ -457,76 +457,90 @@ def build_greeting_blocks() -> dict:
 # 질문 이력 블록
 # ---------------------------------------------------------------------------
 
-_IS_QUESTION_EMOJI = {True: ":question:", False: ":speech_balloon:", None: ":speech_balloon:"}
-_IS_QUESTION_LABEL = {True: "응답필요", False: "기타", None: "기타"}
+_THREADS_PER_DAY_LIMIT = 10
 
 
-def _fmt_dt(dt: Any) -> str:
-    """datetime을 'YYYY.MM.DD' 형식으로 포맷한다."""
-    if isinstance(dt, datetime):
-        return dt.strftime("%Y.%m.%d")
-    return str(dt)[:10]
-
-
-def build_history_blocks(messages: list[Any], channel_name: str = "이 채널") -> dict:
+def build_history_blocks(
+    grouped: dict[date, list[dict]],
+    channel_name: str = "이 채널",
+) -> dict:
     """
-    채널의 질문·요청 이력을 나열하는 Block Kit 페이로드를 반환한다.
-    messages: ConversationMessage ORM 객체 리스트 (최신순).
+    날짜별·스레드별 대화 이력을 Block Kit 페이로드로 반환한다.
+    grouped: get_channel_history_by_date() 반환값 (날짜 내림차순 OrderedDict).
     """
     blocks: list[dict] = [
         {
             "type": "header",
             "text": {
                 "type": "plain_text",
-                "text": f"📋 {channel_name} 질문·요청 이력",
+                "text": f"📋 {channel_name} 대화 이력",
                 "emoji": True,
             },
         },
     ]
 
-    if not messages:
+    if not grouped:
         blocks.append(
             {
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": "_아직 저장된 질문이 없습니다. `@QNA BOT 질문내용` 으로 질문해 보세요!_",
+                    "text": "_아직 저장된 대화가 없습니다. `@QNA BOT 질문내용` 으로 질문해 보세요!_",
                 },
             }
         )
-        return {
-            "text": f"{channel_name} 질문 이력이 없습니다.",
-            "blocks": blocks,
-        }
+        return {"text": f"{channel_name} 대화 이력이 없습니다.", "blocks": blocks}
 
-    # 한 section 블록에 최대 10개씩 나눠서 표시
-    displayed = min(len(messages), 20)
-    chunk_size = 10
-    for chunk_start in range(0, displayed, chunk_size):
-        chunk = messages[chunk_start : chunk_start + chunk_size]
+    total_threads = sum(len(v) for v in grouped.values())
+
+    for day, threads in grouped.items():
+        day_str = day.strftime("%Y.%m.%d")
+        day_count = len(threads)
+
+        blocks.append(
+            {
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": f"*━━━ {day_str} (대화 {day_count}건) ━━━*",
+                    }
+                ],
+            }
+        )
+        blocks.append({"type": "divider"})
+
+        visible = threads[:_THREADS_PER_DAY_LIMIT]
+        overflow = day_count - len(visible)
+
         lines = []
-        for i, msg in enumerate(chunk, start=chunk_start + 1):
-            is_q = getattr(msg, "is_question", None)
-            emoji = _IS_QUESTION_EMOJI.get(is_q, ":speech_balloon:")
-            label = _IS_QUESTION_LABEL.get(is_q, "기타")
-            date_str = _fmt_dt(msg.created_at)
-            author = f"<@{msg.user_id}>" if msg.user_id else "익명"
-            topic = getattr(msg, "topic", None)
-            topic_tag = f"  `{topic}`" if topic else ""
-            text_preview = (msg.content or "")[:40].replace("\n", " ")
-            if len(msg.content or "") > 40:
-                text_preview += "…"
-            lines.append(f"`{i}.` {date_str}  {emoji} *{label}*{topic_tag}  {author}  {text_preview}")
+        for t in visible:
+            topic_tag = f"`{t['topic']}`" if t["topic"] else "(주제 미분류)"
+            authors = " ".join(f"<@{uid}>" for uid in t["user_ids"]) if t["user_ids"] else "익명"
+            msg_count = t["message_count"]
+            entry = f"• {topic_tag} {authors} · 메시지 {msg_count}개"
+            if t.get("q_preview"):
+                entry += f"\n  _Q: {t['q_preview']}_"
+            if t.get("a_preview"):
+                entry += f"\n  _A: {t['a_preview']}_"
+            lines.append(entry)
 
         blocks.append(
             {
                 "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": "\n".join(lines),
-                },
+                "text": {"type": "mrkdwn", "text": "\n".join(lines)},
             }
         )
+
+        if overflow > 0:
+            blocks.append(
+                {
+                    "type": "context",
+                    "elements": [
+                        {"type": "mrkdwn", "text": f"_+{overflow}건 더 있음_"}
+                    ],
+                }
+            )
 
     blocks.append(
         {
@@ -534,16 +548,13 @@ def build_history_blocks(messages: list[Any], channel_name: str = "이 채널") 
             "elements": [
                 {
                     "type": "mrkdwn",
-                    "text": f":information_source: 최근 {displayed}건 표시 | :question: 응답필요  :speech_balloon: 기타",
+                    "text": f":information_source: 최근 7일 · 총 {total_threads}건",
                 }
             ],
         }
     )
 
-    return {
-        "text": f"{channel_name} 최근 질문 이력 {displayed}건",
-        "blocks": blocks,
-    }
+    return {"text": f"{channel_name} 최근 7일 대화 이력 {total_threads}건", "blocks": blocks}
 
 
 # ---------------------------------------------------------------------------
