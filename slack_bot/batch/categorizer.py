@@ -6,7 +6,6 @@ import time
 
 from sqlalchemy.orm import Session
 
-import config
 from db.models import ConversationMessage, get_session_factory
 from services.classifier import classify_message, extract_topic
 
@@ -173,7 +172,7 @@ if __name__ == "__main__":
     )
 
     args = _parse_args()
-    session_factory = get_session_factory(config.DATABASE_URL)
+    session_factory = get_session_factory()
 
     if args.count:
         n = count_unprocessed(session_factory)
