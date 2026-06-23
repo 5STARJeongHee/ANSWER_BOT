@@ -22,13 +22,13 @@ CREATE TABLE IF NOT EXISTS conversation_message (
     content_raw         TEXT,                        -- PII 마스킹 전 원문 (옵션)
     is_question         BOOLEAN,
     is_fallback         BOOLEAN      DEFAULT FALSE,
-    category            VARCHAR(20),                 -- QUESTION | REQUEST | NONE
+
     response_time_ms    INTEGER,                     -- 봇 응답 생성 소요 시간 (ms)
     prompt_tokens       INTEGER,                     -- LLM 입력 추정 토큰
     completion_tokens   INTEGER,                     -- LLM 출력 추정 토큰
     rag_avg_similarity  FLOAT,                       -- RAG top-k 평균 유사도 (0~1)
     used_web_search     BOOLEAN      DEFAULT FALSE,  -- 웹 검색 보조 사용 여부
-    topic               VARCHAR(100),                -- LLM 추출 핵심 주제 태그 (예: "Redis 연결 오류")
+    topic               VARCHAR(200),                -- LLM 추출 핵심 주제 태그 (예: "Redis 연결 오류")
     created_at          TIMESTAMP    NOT NULL DEFAULT NOW(),
 
     CONSTRAINT uq_channel_message_ts UNIQUE (channel_id, message_ts)
@@ -100,3 +100,12 @@ CREATE TABLE IF NOT EXISTS context_summary (
 );
 
 CREATE INDEX IF NOT EXISTS ix_ctx_summary_channel_id ON context_summary (channel_id);
+
+-- ────────────────────────────────────────────────────────────────────────────
+-- bot_settings
+-- ────────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS bot_settings (
+    key        VARCHAR(100) PRIMARY KEY,
+    value      TEXT         NOT NULL,
+    updated_at TIMESTAMP    NOT NULL DEFAULT NOW()
+);

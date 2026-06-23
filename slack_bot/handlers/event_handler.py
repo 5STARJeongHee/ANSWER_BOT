@@ -124,8 +124,8 @@ def _is_backfill_command(text: str) -> tuple[bool, int]:
 # 히스토리 명령 처리
 # ---------------------------------------------------------------------------
 _HISTORY_KEYWORDS = (
-    "히스토리", "history", "내 질문", "질문 목록", "질문목록",
-    "질문 이력", "질문이력", "대화 목록", "대화목록", "이력", "내 대화",
+    "히스토리", "history", "질문 목록", "질문목록", "지난 대화 목록", "대화 목록 요약",
+    "질문 이력", "질문이력", "대화 목록", "대화목록", "이력", "채널 이력", "채널이력",
 )
 
 
@@ -157,6 +157,75 @@ def _is_dashboard_command(text: str) -> tuple[bool, int]:
             days = _parse_backfill_days(rest) if rest else 7
             return True, days
     return False, 0
+
+
+# ---------------------------------------------------------------------------
+# 요약 주기 명령 처리
+# ---------------------------------------------------------------------------
+_SCHEDULE_SET_KEYWORDS = ("요약 주기 설정", "요약주기설정", "summary schedule")
+_SCHEDULE_VIEW_KEYWORDS = ("요약 주기 확인", "요약주기확인", "요약 주기", "summary schedule check")
+
+_WEEKDAY_MAP: dict[str, int] = {
+    "월": 0, "화": 1, "수": 2, "목": 3, "금": 4, "토": 5, "일": 6,
+    "월요일": 0, "화요일": 1, "수요일": 2, "목요일": 3, "금요일": 4, "토요일": 5, "일요일": 6,
+    "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3, "friday": 4, "saturday": 5, "sunday": 6,
+    "mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6,
+}
+
+
+def _parse_hour(text: str) -> Optional[int]:
+    """텍스트에서 시각(0~23)을 추출한다. 예: '3시', '오전 2시', '14시'"""
+    m = re.search(r"(\d{1,2})\s*시", text)
+    if m:
+        h = int(m.group(1))
+        return h if 0 <= h <= 23 else None
+    return None
+
+
+def _parse_schedule_config(text: str) -> Optional[dict]:
+    """
+    자연어 주기 표현을 schedule config dict로 변환한다.
+    예: "매일 3시" → {"type": "daily", "hour": 3}
+        "매주 월요일 2시" → {"type": "weekly", "weekday": 0, "hour": 2}
+        "매월 1일 2시" → {"type": "monthly", "day": 1, "hour": 2}
+    인식 불가 시 None 반환.
+    """
+    t = text.strip().lower()
+    hour = _parse_hour(t) if _parse_hour(t) is not None else 2
+
+    if "매일" in t or "daily" in t or "every day" in t:
+        return {"type": "daily", "hour": hour}
+
+    if "매월" in t or "monthly" in t or "every month" in t:
+        m = re.search(r"(\d{1,2})\s*일", t)
+        day = int(m.group(1)) if m and 1 <= int(m.group(1)) <= 31 else 1
+        return {"type": "monthly", "day": day, "hour": hour}
+
+    if "매주" in t or "weekly" in t or "every week" in t:
+        weekday = 0
+        for name, idx in _WEEKDAY_MAP.items():
+            if name in t:
+                weekday = idx
+                break
+        return {"type": "weekly", "weekday": weekday, "hour": hour}
+
+    return None
+
+
+def _is_schedule_command(text: str) -> tuple[bool, bool]:
+    """
+    텍스트가 스케줄 명령인지 확인한다.
+    반환: (is_schedule: bool, is_view_only: bool)
+    """
+    lower = text.strip().lower()
+    is_set = any(lower.startswith(kw.lower()) for kw in _SCHEDULE_SET_KEYWORDS)
+    if is_set:
+        return True, False
+    is_view = any(
+        lower == kw.lower().replace(" ", "") or lower.startswith(kw.lower())
+        for kw in _SCHEDULE_VIEW_KEYWORDS
+    )
+    return is_view, True
 
 
 # ---------------------------------------------------------------------------
@@ -235,6 +304,27 @@ def _run_backfill_in_background(
             bf_client = WebClient(token=config.SLACK_BOT_TOKEN)
             total = 0
             failed = 0
+            last_progress_at: dict[str, float] = {}
+
+            def notify_progress(progress: dict) -> None:
+                ch_id = progress["channel_id"]
+                now = time.monotonic()
+                previous = last_progress_at.get(ch_id, 0.0)
+                if progress["page"] != 1 and now - previous < 30:
+                    return
+                last_progress_at[ch_id] = now
+                post_message(
+                    client=client,
+                    channel=channel_id,
+                    thread_ts=thread_ts,
+                    text=(
+                        f"  ⏱️ <#{ch_id}> 진행 중 — "
+                        f"{progress['page']}페이지 처리, "
+                        f"{progress['fetched_total']}건 확인, "
+                        f"{progress['saved_total']}건 저장"
+                    ),
+                )
+
             for ch_id in config.TARGET_CHANNEL_IDS:
                 try:
                     count = backfill_channel(
@@ -243,6 +333,7 @@ def _run_backfill_in_background(
                         channel_id=ch_id,
                         days=days,
                         force=True,  # 슬랙 명령 백필은 항상 강제 재수집
+                        progress_callback=notify_progress,
                     )
                     total += count
                     post_message(
@@ -374,7 +465,6 @@ def _save_message_and_embed(
     content: str,
     is_question: Optional[bool] = None,
     is_fallback: bool = False,
-    category: Optional[str] = None,
     response_time_ms: Optional[int] = None,
     prompt_tokens: Optional[int] = None,
     completion_tokens: Optional[int] = None,
@@ -407,7 +497,6 @@ def _save_message_and_embed(
             content=clean_content,
             is_question=is_question,
             is_fallback=is_fallback,
-            category=category,
             response_time_ms=response_time_ms,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
@@ -822,6 +911,55 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
             return
         # ────────────────────────────────────────────────────────────────────
 
+        # ── 요약 주기 명령 감지 ─────────────────────────────────────────────
+        is_schedule, is_view_only = _is_schedule_command(question)
+        if is_schedule:
+            if is_view_only:
+                logger.info(f"요약 주기 확인 명령 수신: user={user_id}")
+                from batch.scheduler import get_current_schedule_description
+                desc = get_current_schedule_description(session_factory)
+                post_message(
+                    client=client,
+                    channel=channel_id,
+                    thread_ts=thread_ts,
+                    text=f"🕐 현재 요약 배치 주기: *{desc}*",
+                )
+            else:
+                # "요약 주기 설정 매일 3시" 에서 설정 부분 추출
+                lower_q = question.strip().lower()
+                rest = question.strip()
+                for kw in _SCHEDULE_SET_KEYWORDS:
+                    if lower_q.startswith(kw.lower()):
+                        rest = question.strip()[len(kw):].strip()
+                        break
+
+                cfg = _parse_schedule_config(rest)
+                if cfg is None:
+                    post_message(
+                        client=client,
+                        channel=channel_id,
+                        thread_ts=thread_ts,
+                        text=(
+                            "⚠️ 주기 형식을 인식하지 못했습니다.\n"
+                            "다음 형식으로 입력해 주세요.\n"
+                            "• `요약 주기 설정 매일 3시`\n"
+                            "• `요약 주기 설정 매주 월요일 2시`\n"
+                            "• `요약 주기 설정 매월 1일 2시`"
+                        ),
+                    )
+                else:
+                    logger.info(f"요약 주기 변경 명령 수신: user={user_id} cfg={cfg}")
+                    from batch.scheduler import update_summary_schedule
+                    desc = update_summary_schedule(session_factory, cfg)
+                    post_message(
+                        client=client,
+                        channel=channel_id,
+                        thread_ts=thread_ts,
+                        text=f"✅ 요약 배치 주기가 변경되었습니다. *{desc}* 기준으로 실행됩니다.",
+                    )
+            return
+        # ────────────────────────────────────────────────────────────────────
+
         logger.info(f"앱 멘션 수신: channel={channel_id} user={user_id} text={question[:50]!r}")
 
         # 즉시 '답변 중' 표시 전송 (3초 이내 ack 이후)
@@ -849,7 +987,6 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
                 role="user",
                 content=effective_question,
                 is_question=True,
-                category="QUESTION",
                 prompt_tokens=estimate_tokens(effective_question),
                 topic=extract_topic(effective_question),
             )
@@ -1058,7 +1195,6 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
                 role="user",
                 content=effective_content,
                 is_question=classify_result.is_actionable,
-                category=classify_result.category.value,
                 prompt_tokens=estimate_tokens(effective_content),
                 topic=_topic,
             )

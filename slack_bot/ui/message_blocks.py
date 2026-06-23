@@ -333,7 +333,7 @@ def build_intro_blocks() -> dict:
                     "• *`@QNA BOT 백필 [기간]`* — 채널의 과거 대화를 재수집합니다.\n"
                     "  기간 예시: `7일` `2주` `한달` `3개월` `90` *(숫자는 일 수)*\n"
                     "  기간 생략 시 기본 90일 기준으로 실행됩니다.\n\n"
-                    "• *`@QNA BOT 히스토리`* — 나의 최근 질문·요청 이력을 카테고리별로 보여줍니다.\n\n"
+                    "• *`@QNA BOT 히스토리`* — 이 채널의 최근 질문·대화 이력을 보여줍니다.\n\n"
                     "• *`@QNA BOT 대시보드 [기간]`* — 봇 응답 통계 대시보드를 표시합니다.\n"
                     "  기간 예시: `7일` `한달` *(기간 생략 시 기본 7일)*\n\n"
                     "• *`@QNA BOT 소개`* / *`@QNA BOT 도움말`* — 이 안내를 다시 표시합니다."
@@ -457,16 +457,8 @@ def build_greeting_blocks() -> dict:
 # 질문 이력 블록
 # ---------------------------------------------------------------------------
 
-_CATEGORY_EMOJI = {
-    "QUESTION": ":question:",
-    "REQUEST": ":memo:",
-    "NONE": ":speech_balloon:",
-}
-_CATEGORY_LABEL = {
-    "QUESTION": "질문",
-    "REQUEST": "요청",
-    "NONE": "기타",
-}
+_IS_QUESTION_EMOJI = {True: ":question:", False: ":speech_balloon:", None: ":speech_balloon:"}
+_IS_QUESTION_LABEL = {True: "응답필요", False: "기타", None: "기타"}
 
 
 def _fmt_dt(dt: Any) -> str:
@@ -514,9 +506,9 @@ def build_history_blocks(messages: list[Any], channel_name: str = "이 채널") 
         chunk = messages[chunk_start : chunk_start + chunk_size]
         lines = []
         for i, msg in enumerate(chunk, start=chunk_start + 1):
-            cat = msg.category or "NONE"
-            emoji = _CATEGORY_EMOJI.get(cat, ":speech_balloon:")
-            label = _CATEGORY_LABEL.get(cat, cat)
+            is_q = getattr(msg, "is_question", None)
+            emoji = _IS_QUESTION_EMOJI.get(is_q, ":speech_balloon:")
+            label = _IS_QUESTION_LABEL.get(is_q, "기타")
             date_str = _fmt_dt(msg.created_at)
             author = f"<@{msg.user_id}>" if msg.user_id else "익명"
             topic = getattr(msg, "topic", None)
@@ -542,7 +534,7 @@ def build_history_blocks(messages: list[Any], channel_name: str = "이 채널") 
             "elements": [
                 {
                     "type": "mrkdwn",
-                    "text": f":information_source: 최근 {displayed}건 표시 | 카테고리: :question: 질문  :memo: 요청  :speech_balloon: 기타",
+                    "text": f":information_source: 최근 {displayed}건 표시 | :question: 응답필요  :speech_balloon: 기타",
                 }
             ],
         }
@@ -578,8 +570,8 @@ def build_dashboard_blocks(
     avg_ms = stats.get("avg_response_ms")
     prompt_tokens = stats.get("total_prompt_tokens", 0)
     completion_tokens = stats.get("total_completion_tokens", 0)
-    q_count = stats.get("category_question", 0)
-    r_count = stats.get("category_request", 0)
+    actionable_count = stats.get("actionable_count", 0)
+    non_actionable_count = stats.get("non_actionable_count", 0)
     avg_rag = stats.get("avg_rag_similarity")
     web_search_count = stats.get("web_search_count", 0)
     web_search_rate = stats.get("web_search_rate", 0.0)
@@ -657,12 +649,12 @@ def build_dashboard_blocks(
             ],
         },
         {"type": "divider"},
-        # 질문 유형 분포
+        # 응답 필요 여부 분포
         {
             "type": "section",
             "fields": [
-                {"type": "mrkdwn", "text": f"*:question: 질문*\n{q_count}건"},
-                {"type": "mrkdwn", "text": f"*:memo: 요청*\n{r_count}건"},
+                {"type": "mrkdwn", "text": f"*:question: 응답필요*\n{actionable_count}건"},
+                {"type": "mrkdwn", "text": f"*:speech_balloon: 기타*\n{non_actionable_count}건"},
             ],
         },
         {"type": "divider"},

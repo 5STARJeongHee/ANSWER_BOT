@@ -8,7 +8,7 @@ from sqlalchemy import func, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from db.models import ConversationMessage, ContextEmbedding, ContextSummary, MessageFeedback
+from db.models import BotSetting, ConversationMessage, ContextEmbedding, ContextSummary, MessageFeedback
 import config
 
 logger = logging.getLogger(__name__)
@@ -30,7 +30,6 @@ def upsert_message(
     content: str,
     is_question: Optional[bool] = None,
     is_fallback: bool = False,
-    category: Optional[str] = None,
     response_time_ms: Optional[int] = None,
     prompt_tokens: Optional[int] = None,
     completion_tokens: Optional[int] = None,
@@ -73,8 +72,6 @@ def upsert_message(
         existing.content = content
         if is_question is not None:
             existing.is_question = is_question
-        if category is not None:
-            existing.category = category
         if response_time_ms is not None:
             existing.response_time_ms = response_time_ms
         if prompt_tokens is not None:
@@ -103,7 +100,6 @@ def upsert_message(
         content=content,
         is_question=is_question,
         is_fallback=is_fallback,
-        category=category,
         response_time_ms=response_time_ms,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
@@ -668,16 +664,25 @@ def get_dashboard_stats(session: Session, period_days: int = 7) -> dict:
     ).fetchall()
     feedback = {row[0]: int(row[1]) for row in feedback_rows}
 
-    category_rows = session.execute(
-        text(
-            "SELECT COALESCE(category, 'NONE'), COUNT(*) "
-            "FROM conversation_message "
-            "WHERE role='user' AND created_at >= :since "
-            "GROUP BY COALESCE(category, 'NONE')"
-        ),
-        {"since": since},
-    ).fetchall()
-    categories = {row[0]: int(row[1]) for row in category_rows}
+    actionable_count = (
+        session.query(func.count(ConversationMessage.id))
+        .filter(
+            ConversationMessage.role == "user",
+            ConversationMessage.is_question == True,  # noqa: E712
+            ConversationMessage.created_at >= since,
+        )
+        .scalar()
+    ) or 0
+
+    non_actionable_count = (
+        session.query(func.count(ConversationMessage.id))
+        .filter(
+            ConversationMessage.role == "user",
+            ConversationMessage.is_question == False,  # noqa: E712
+            ConversationMessage.created_at >= since,
+        )
+        .scalar()
+    ) or 0
 
     avg_rag_similarity = (
         session.query(func.avg(ConversationMessage.rag_avg_similarity))
@@ -729,9 +734,8 @@ def get_dashboard_stats(session: Session, period_days: int = 7) -> dict:
         "total_completion_tokens": int(total_completion_tokens),
         "positive_feedback": feedback.get("positive", 0),
         "negative_feedback": feedback.get("negative", 0),
-        "category_question": categories.get("QUESTION", 0),
-        "category_request": categories.get("REQUEST", 0),
-        "category_none": categories.get("NONE", 0),
+        "actionable_count": int(actionable_count),
+        "non_actionable_count": int(non_actionable_count),
         "avg_rag_similarity": round(float(avg_rag_similarity), 3) if avg_rag_similarity else None,
         "web_search_count": int(web_search_count),
         "web_search_rate": round(web_search_count / total_bot, 3) if total_bot else 0.0,
@@ -813,3 +817,24 @@ def has_negative_feedback(session: Session, message_id: int) -> bool:
     neg = sum(1 for f in feedbacks if f.sentiment == "negative")
     pos = sum(1 for f in feedbacks if f.sentiment == "positive")
     return neg > pos
+
+
+# ---------------------------------------------------------------------------
+# BotSetting CRUD
+# ---------------------------------------------------------------------------
+
+def get_bot_setting(session: Session, key: str) -> Optional[str]:
+    """설정값을 반환한다. 없으면 None을 반환한다."""
+    row = session.query(BotSetting).filter(BotSetting.key == key).first()
+    return row.value if row else None
+
+
+def save_bot_setting(session: Session, key: str, value: str) -> None:
+    """설정값을 저장하거나 갱신한다."""
+    row = session.query(BotSetting).filter(BotSetting.key == key).first()
+    if row:
+        row.value = value
+        row.updated_at = datetime.utcnow()
+    else:
+        session.add(BotSetting(key=key, value=value, updated_at=datetime.utcnow()))
+    session.flush()

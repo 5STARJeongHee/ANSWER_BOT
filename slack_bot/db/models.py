@@ -1,4 +1,4 @@
-# SQLAlchemy ORM 모델 정의 (conversation_message, context_embedding, context_summary, message_feedback)
+# SQLAlchemy ORM 모델 정의 (conversation_message, context_embedding, context_summary, message_feedback, bot_settings)
 from datetime import datetime
 
 from sqlalchemy import (
@@ -42,7 +42,7 @@ class ConversationMessage(Base):
     content_raw = Column(Text, nullable=True)  # PII 마스킹 전 원문 (옵션)
     is_question = Column(Boolean, nullable=True)
     is_fallback = Column(Boolean, default=False)
-    category = Column(String(20), nullable=True)          # QUESTION / REQUEST / NONE
+    category = Column(String(20), nullable=True)          # 미사용(레거시) — is_question으로 대체됨
     response_time_ms = Column(Integer, nullable=True)     # 봇 응답 생성 소요 시간 (ms)
     prompt_tokens = Column(Integer, nullable=True)        # LLM에 전달한 입력 토큰 수
     completion_tokens = Column(Integer, nullable=True)    # LLM이 생성한 출력 토큰 수
@@ -115,6 +115,19 @@ class MessageFeedback(Base):
             f"<MessageFeedback id={self.id} ts={self.message_ts} "
             f"user={self.user_id} sentiment={self.sentiment}>"
         )
+
+
+class BotSetting(Base):
+    """봇 설정을 저장하는 key-value 테이블."""
+
+    __tablename__ = "bot_settings"
+
+    key = Column(String(100), primary_key=True)
+    value = Column(Text, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    def __repr__(self) -> str:
+        return f"<BotSetting key={self.key!r}>"
 
 
 class ContextSummary(Base):
