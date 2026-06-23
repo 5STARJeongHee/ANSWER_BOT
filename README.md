@@ -167,6 +167,61 @@ Slack에서 직접 명령할 수도 있습니다.
 
 ---
 
+## 배치 작업 수동 실행
+
+### topic / is_question 보정 배치
+
+백필로 수집된 과거 메시지는 `topic`과 `is_question`이 비어 있습니다.  
+아래 명령으로 일괄 보정합니다.
+
+#### Docker로 실행 중인 경우
+
+```bash
+# 미처리 메시지 수 확인
+docker compose exec app python -m batch.categorizer --count
+
+# 기본 200건 처리
+docker compose exec app python -m batch.categorizer
+
+# 전체 미처리 메시지 한꺼번에 처리
+docker compose exec app python -m batch.categorizer --all
+
+# DB 반영 없이 결과만 확인 (dry-run)
+docker compose exec app python -m batch.categorizer --dry-run
+
+# 처리 건수 지정
+docker compose exec app python -m batch.categorizer --limit 500
+```
+
+#### 로컬(터미널)에서 직접 실행하는 경우
+
+```bash
+cd slack_bot
+python -m batch.categorizer --count
+python -m batch.categorizer --all
+```
+
+> `DATABASE_URL` 환경변수가 설정되어 있어야 합니다. conda 환경은 `conda activate` 후 `.env` 값을 수동으로 설정하거나 `config.py`를 참고하세요.
+
+### 자동 실행 (APScheduler)
+
+앱이 실행 중이면 아래 배치가 자동으로 돌아갑니다.
+
+| 배치 | 기본 주기 | 설명 |
+|------|----------|------|
+| 대화 요약 | 매주 월요일 새벽 2시 | 채널별 주간 대화 요약 생성 |
+| topic·is_question 보정 | 매일 새벽 4시 | 미처리 메시지 LLM 분류 및 주제 추출 |
+
+요약 배치 주기는 Slack에서 변경할 수 있습니다.
+
+```
+@QNA BOT 요약 주기 설정 매일 3시
+@QNA BOT 요약 주기 설정 매주 월요일 2시
+@QNA BOT 요약 주기 확인
+```
+
+---
+
 ## 디렉토리 구조
 
 ```
