@@ -5,7 +5,7 @@ import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Callable, Optional
 
 from slack_sdk import WebClient
 
@@ -76,6 +76,7 @@ def backfill_channel(
     channel_id: str,
     days: int = _BACKFILL_DAYS,
     force: bool = False,
+    progress_callback: Optional[Callable[[dict], None]] = None,
 ) -> int:
     """
     지정 채널의 최근 N일 대화를 수집하여 DB에 저장한다.
@@ -245,6 +246,23 @@ def backfill_channel(
                     f" | 누적 저장 {collected_count}건 / 가져옴 {fetched_total}건"
                     + (" | 다음 페이지 있음" if has_next else " | 마지막 페이지")
                 )
+                if progress_callback:
+                    try:
+                        progress_callback(
+                            {
+                                "channel_id": channel_id,
+                                "page": page,
+                                "page_fetched": len(valid_msgs),
+                                "page_saved": page_new,
+                                "page_skipped": page_dup,
+                                "fetched_total": fetched_total,
+                                "saved_total": collected_count,
+                                "skipped_total": dup_count,
+                                "has_next": has_next,
+                            }
+                        )
+                    except Exception as exc:
+                        logger.warning(f"백필 진행 알림 콜백 실패 (channel={channel_id}): {exc}")
 
             except Exception as exc:
                 session.rollback()
@@ -280,6 +298,7 @@ def run_all_channels_backfill(
     session_factory,
     days: int = _BACKFILL_DAYS,
     force: bool = False,
+    progress_callback: Optional[Callable[[dict], None]] = None,
 ) -> None:
     """
     모든 대상 채널의 백필을 순차 실행한다.
@@ -298,6 +317,7 @@ def run_all_channels_backfill(
             channel_id=channel_id,
             days=days,
             force=force,
+            progress_callback=progress_callback,
         )
         total += count
         # 채널 간 대기 (rate limit 분산)

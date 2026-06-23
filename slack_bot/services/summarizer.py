@@ -131,16 +131,16 @@ def summarize_thread_context(thread_messages: list[dict]) -> Optional[str]:
     return summary.strip() if summary else None
 
 
-def run_weekly_summary(session: Session) -> None:
+def run_summary_batch(session: Session, period_days: int = 7) -> None:
     """
-    모든 대상 채널에 대해 지난 주 대화를 요약하는 배치를 실행한다.
-    APScheduler에 의해 주 1회 호출된다.
+    모든 대상 채널에 대해 최근 period_days일의 대화를 요약하는 배치를 실행한다.
+    APScheduler에 의해 호출된다.
     """
     today = date.today()
     period_end = today - timedelta(days=1)
-    period_start = period_end - timedelta(days=6)
+    period_start = period_end - timedelta(days=period_days - 1)
 
-    logger.info(f"주간 요약 배치 시작 ({period_start} ~ {period_end})")
+    logger.info(f"요약 배치 시작 ({period_start} ~ {period_end}, {period_days}일 기간)")
 
     for channel_id in config.TARGET_CHANNEL_IDS:
         try:
@@ -157,4 +157,9 @@ def run_weekly_summary(session: Session) -> None:
         except Exception as exc:
             logger.error(f"채널 {channel_id} 요약 오류: {exc}", exc_info=True)
 
-    logger.info("주간 요약 배치 완료")
+    logger.info("요약 배치 완료")
+
+
+def run_weekly_summary(session: Session) -> None:
+    """하위 호환 래퍼 — 주간(7일) 배치를 실행한다."""
+    run_summary_batch(session=session, period_days=7)

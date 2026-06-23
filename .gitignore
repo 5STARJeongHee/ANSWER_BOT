@@ -220,6 +220,11 @@ __marimo__/
 # Claude Code 에이전트 설정 (로컬 전용)
 .claude/
 
+# Codex 에이전트 설정 (로컬 전용)
+.codex/
+
+# Gemini 에이전트 설정 (로컬 전용)
+.gemini/
 # Docker 볼륨 데이터
 postgres_data/
 
