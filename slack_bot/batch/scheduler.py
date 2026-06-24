@@ -45,6 +45,15 @@ def _run_categorize_job(session_factory) -> None:
         logger.error(f"보정 배치 오류: {exc}", exc_info=True)
 
 
+def _run_normalize_job(session_factory) -> None:
+    """topic 정규화 배치 작업 래퍼 (APScheduler에서 호출)."""
+    from batch.topic_normalizer import run_normalize_batch
+    try:
+        run_normalize_batch(session_factory)
+    except Exception as exc:
+        logger.error(f"정규화 배치 오류: {exc}", exc_info=True)
+
+
 def _make_trigger(cfg: dict) -> CronTrigger:
     """schedule config dict로 CronTrigger를 생성한다."""
     t = cfg.get("type", "weekly")
@@ -191,6 +200,19 @@ def create_scheduler(session_factory) -> BackgroundScheduler:
         replace_existing=True,
     )
 
+    # topic 정규화 — 매일 새벽 3시 (보정 배치보다 1시간 앞서 실행)
+    scheduler.add_job(
+        func=_run_normalize_job,
+        trigger=CronTrigger(hour=3, minute=0, timezone="Asia/Seoul"),
+        args=[session_factory],
+        id="normalize",
+        name="topic 정규화 배치",
+        replace_existing=True,
+    )
+
     _scheduler = scheduler
-    logger.info(f"스케줄러 작업 등록 완료: summary ({_describe_schedule(cfg)}), topic·is_question 보정 (매일 04:00)")
+    logger.info(
+        f"스케줄러 작업 등록 완료: summary ({_describe_schedule(cfg)}), "
+        "topic 정규화 (매일 03:00), topic·is_question 보정 (매일 04:00)"
+    )
     return scheduler

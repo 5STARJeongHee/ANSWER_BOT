@@ -203,6 +203,41 @@ python -m batch.categorizer --all
 
 > `DATABASE_URL` 환경변수가 설정되어 있어야 합니다. conda 환경은 `conda activate` 후 `.env` 값을 수동으로 설정하거나 `config.py`를 참고하세요.
 
+### topic 정규화 배치 (Stage 2)
+
+Stage 1 보정 배치로 추출된 topic은 자유 텍스트이므로 같은 의미의 표현이 다양하게 저장됩니다.  
+정규화 배치는 LLM 한 번 호출로 distinct topic을 그룹핑하여 canonical 이름으로 통합합니다.
+
+#### Docker로 실행 중인 경우
+
+```bash
+# 정규화 대상 distinct topic 수 확인
+docker compose exec app python -m batch.topic_normalizer --count
+
+# 결과 확인만 (dry-run — DB 미반영)
+docker compose exec app python -m batch.topic_normalizer --dry-run
+
+# 실행 (DB 반영)
+docker compose exec app python -m batch.topic_normalizer
+```
+
+#### 로컬(터미널)에서 직접 실행하는 경우
+
+```bash
+cd slack_bot
+python -m batch.topic_normalizer --count
+python -m batch.topic_normalizer --dry-run
+python -m batch.topic_normalizer
+```
+
+#### Slack에서 즉시 실행
+
+```
+@QNA BOT 정규화 실행
+```
+
+> 정규화는 topic이 충분히 쌓인 후(채널당 200건 이상 권장) 실행하면 효과적입니다.
+
 ### 자동 실행 (APScheduler)
 
 앱이 실행 중이면 아래 배치가 자동으로 돌아갑니다.
@@ -210,6 +245,7 @@ python -m batch.categorizer --all
 | 배치 | 기본 주기 | 설명 |
 |------|----------|------|
 | 대화 요약 | 매주 월요일 새벽 2시 | 채널별 주간 대화 요약 생성 |
+| topic 정규화 | 매일 새벽 3시 | 자유 텍스트 topic을 canonical 이름으로 통합 |
 | topic·is_question 보정 | 매일 새벽 4시 | 미처리 메시지 LLM 분류 및 주제 추출 |
 
 요약 배치 주기는 Slack에서 변경할 수 있습니다.
@@ -244,7 +280,7 @@ SLACK_BOT/
 │   ├── batch/
 │   │   ├── collector.py          # 증분 백필
 │   │   ├── scheduler.py          # APScheduler 주간 요약 배치
-│   │   └── topic_normalizer.py   # 주제 태그 정규화 배치 (Stage 2, 미구현)
+│   │   └── topic_normalizer.py   # 주제 태그 정규화 배치 (Stage 2) — LLM 그룹핑으로 canonical 통합
 │   ├── ui/
 │   │   ├── message_blocks.py     # Block Kit 컴포넌트 (답변·히스토리·대시보드)
 │   │   └── reaction_handler.py   # 이모지 피드백 처리

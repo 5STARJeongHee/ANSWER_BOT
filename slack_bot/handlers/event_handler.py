@@ -230,6 +230,85 @@ def _is_schedule_command(text: str) -> tuple[bool, bool]:
 
 
 # ---------------------------------------------------------------------------
+# 정규화 명령 처리
+# ---------------------------------------------------------------------------
+_NORMALIZE_KEYWORDS = ("정규화 실행", "topic 정규화", "토픽 정규화", "normalize topics")
+
+# 동시 정규화 실행 방지 플래그
+_normalize_running = threading.Event()
+
+
+def _is_normalize_command(text: str) -> bool:
+    """텍스트가 topic 정규화 실행 명령인지 확인한다."""
+    lower = text.strip().lower().replace(" ", "")
+    return any(kw.replace(" ", "") in lower for kw in _NORMALIZE_KEYWORDS)
+
+
+def _run_normalize_in_background(
+    client,
+    channel_id: str,
+    thread_ts: Optional[str],
+    session_factory,
+) -> None:
+    """
+    topic 정규화 배치를 백그라운드 스레드로 실행하고 Slack에 결과를 전송한다.
+    동시 실행 방지: 이미 실행 중이면 즉시 반환한다.
+    """
+    if _normalize_running.is_set():
+        post_message(
+            client=client,
+            channel=channel_id,
+            thread_ts=thread_ts,
+            text="⏳ 이미 정규화가 실행 중입니다. 완료 후 다시 시도해 주세요.",
+        )
+        return
+
+    post_message(
+        client=client,
+        channel=channel_id,
+        thread_ts=thread_ts,
+        text="🔄 *topic 정규화 시작*\nLLM 그룹핑 중입니다. 잠시 기다려 주세요.",
+    )
+
+    def worker():
+        _normalize_running.set()
+        try:
+            from batch.topic_normalizer import run_normalize_batch
+            stats = run_normalize_batch(session_factory)
+            if stats["errors"] > 0 and stats["rows_updated"] == 0:
+                post_message(
+                    client=client,
+                    channel=channel_id,
+                    thread_ts=thread_ts,
+                    text="❌ *정규화 실패*\nLLM 호출 오류가 발생했습니다. 로그를 확인해 주세요.",
+                )
+            else:
+                post_message(
+                    client=client,
+                    channel=channel_id,
+                    thread_ts=thread_ts,
+                    text=(
+                        f"✅ *topic 정규화 완료*\n"
+                        f"• distinct topic: *{stats['distinct_topics']}개*\n"
+                        f"• 통합 후 그룹: *{stats['groups_formed']}개*\n"
+                        f"• 행 업데이트: *{stats['rows_updated']}건*"
+                    ),
+                )
+        except Exception as exc:
+            logger.error(f"정규화 백그라운드 오류: {exc}", exc_info=True)
+            post_message(
+                client=client,
+                channel=channel_id,
+                thread_ts=thread_ts,
+                text=f"❌ *정규화 오류*: {exc}",
+            )
+        finally:
+            _normalize_running.clear()
+
+    threading.Thread(target=worker, daemon=True, name="slack-cmd-normalize").start()
+
+
+# ---------------------------------------------------------------------------
 # 소개 / 도움말 명령 처리
 # ---------------------------------------------------------------------------
 _INTRO_KEYWORDS = (
@@ -958,6 +1037,26 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
                         thread_ts=thread_ts,
                         text=f"✅ 요약 배치 주기가 변경되었습니다. *{desc}* 기준으로 실행됩니다.",
                     )
+            return
+        # ────────────────────────────────────────────────────────────────────
+
+        # ── 정규화 명령 감지 ────────────────────────────────────────────────
+        if _is_normalize_command(question):
+            if config.BACKFILL_ADMIN_USER_IDS and user_id not in config.BACKFILL_ADMIN_USER_IDS:
+                post_message(
+                    client=client,
+                    channel=channel_id,
+                    thread_ts=thread_ts,
+                    text="⛔ 정규화 실행 권한이 없습니다. 관리자에게 문의하세요.",
+                )
+                return
+            logger.info(f"정규화 명령 수신: user={user_id}")
+            _run_normalize_in_background(
+                client=client,
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+                session_factory=session_factory,
+            )
             return
         # ────────────────────────────────────────────────────────────────────
 
