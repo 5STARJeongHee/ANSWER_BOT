@@ -146,6 +146,12 @@ ENABLE_THREAD_CHUNKING: bool = os.getenv("ENABLE_THREAD_CHUNKING", "true").lower
 # thread 청크 최대 문자 수 (Q&A 흐름 보존 우선)
 THREAD_CHUNK_MAX_CHARS: int = int(os.getenv("THREAD_CHUNK_MAX_CHARS", "1500"))
 
+# --- Session 윈도우 청킹 설정 (비스레드 채널 대화 묶음 임베딩) ---
+# true: 비스레드 채널 메시지를 슬라이딩 윈도우로 묶어 session 청크로 추가 임베딩
+ENABLE_SESSION_CHUNKING: bool = os.getenv("ENABLE_SESSION_CHUNKING", "true").lower() == "true"
+# 슬라이딩 윈도우 크기(분) — Slack의 시각적 메시지 묶음 단위에 맞춤
+SESSION_WINDOW_MINUTES: int = int(os.getenv("SESSION_WINDOW_MINUTES", "5"))
+
 # --- LLM 설정 ---
 MAX_CONTEXT_TOKENS: int = int(os.getenv("MAX_CONTEXT_TOKENS", "6000"))
 MAX_RETRIES: int = int(os.getenv("MAX_RETRIES", "3"))

@@ -546,6 +546,115 @@ def save_mention_chain_embedding(
     )
 
 
+def save_session_window_embedding(
+    session: Session,
+    *,
+    channel_id: str,
+    current_message_ts: str,
+    embed_fn,
+    window_minutes: int = 5,
+) -> Optional[ContextEmbedding]:
+    """
+    비스레드 채널에서 current_message_ts 기준 window_minutes 내 메시지를
+    멀티스피커 포맷으로 합쳐 session 청크로 임베딩한다.
+    앵커는 윈도우 내 첫 메시지 ID를 사용하며, 기존 session 청크가 있으면 갱신한다.
+    2개 미만 메시지는 처리하지 않는다.
+    """
+    import json
+
+    try:
+        current_ts_float = float(current_message_ts)
+    except (ValueError, TypeError):
+        return None
+
+    window_start_float = current_ts_float - window_minutes * 60
+
+    # 최근 비스레드 사용자 메시지 100개를 가져온 뒤 Python에서 시간 필터링한다.
+    # message_ts가 Slack epoch float 문자열이므로 SQL CAST 없이 Python에서 파싱하는 게 안전하다.
+    candidates = (
+        session.query(ConversationMessage)
+        .filter(
+            ConversationMessage.channel_id == channel_id,
+            ConversationMessage.thread_ts == None,  # noqa: E711
+            ConversationMessage.role == "user",
+        )
+        .order_by(ConversationMessage.message_ts.desc())
+        .limit(100)
+        .all()
+    )
+
+    msgs = []
+    for msg in candidates:
+        try:
+            ts = float(msg.message_ts)
+        except (ValueError, TypeError):
+            continue
+        if window_start_float <= ts <= current_ts_float:
+            msgs.append((ts, msg))
+
+    msgs.sort(key=lambda x: x[0])
+    msgs = [m for _, m in msgs]
+
+    if len(msgs) < 2:
+        return None
+
+    # 발화자가 바뀔 때만 [user_id] 레이블을 붙여 멀티스피커 흐름을 표현한다
+    parts = []
+    prev_user = None
+    for msg in msgs:
+        if msg.user_id != prev_user:
+            parts.append(f"[{msg.user_id or '사용자'}] {msg.content.strip()}")
+            prev_user = msg.user_id
+        else:
+            parts.append(msg.content.strip())
+    chunk_text = "\n".join(parts)
+
+    if len(chunk_text) > config.THREAD_CHUNK_MAX_CHARS:
+        chunk_text = chunk_text[:config.THREAD_CHUNK_MAX_CHARS]
+
+    first_msg = msgs[0]
+
+    existing = (
+        session.query(ContextEmbedding)
+        .filter(
+            ContextEmbedding.source_message_id == first_msg.id,
+            ContextEmbedding.chunk_type == "session",
+        )
+        .first()
+    )
+
+    embedding = embed_fn(chunk_text)
+
+    if existing:
+        existing.chunk_text = chunk_text
+        if embedding:
+            existing.embedding_json = json.dumps(embedding)
+            if config.ENABLE_VECTOR_SEARCH:
+                vec_str = "[" + ",".join(str(v) for v in embedding) + "]"
+                try:
+                    session.execute(text("SAVEPOINT session_chunk_vec"))
+                    session.execute(
+                        text(
+                            "UPDATE context_embedding SET embedding = CAST(:vec AS vector) "
+                            "WHERE id = :id"
+                        ),
+                        {"vec": vec_str, "id": existing.id},
+                    )
+                    session.execute(text("RELEASE SAVEPOINT session_chunk_vec"))
+                except Exception:
+                    session.execute(text("ROLLBACK TO SAVEPOINT session_chunk_vec"))
+        session.flush()
+        return existing
+
+    return save_embedding(
+        session=session,
+        source_message_id=first_msg.id,
+        chunk_text=chunk_text,
+        embedding=embedding,
+        chunk_type="session",
+    )
+
+
 # ---------------------------------------------------------------------------
 # ContextSummary CRUD
 # ---------------------------------------------------------------------------

@@ -600,27 +600,25 @@ def _save_message_and_embed(
     finally:
         session.close()
 
-    # 2단계: 임베딩 생성 후 저장 (CPU 집약 작업은 커밋 후 수행)
-    # 너무 짧은 메시지는 RAG 노이즈가 되므로 임베딩 생략
+    # 2단계: 개별 메시지 임베딩 (너무 짧으면 생략하되, 이후 단계는 계속 진행한다)
     if len(clean_content.strip()) < config.EMBED_MIN_CHARS:
         logger.debug(f"임베딩 생략 — 메시지 너무 짧음 ({len(clean_content)}자 < {config.EMBED_MIN_CHARS}, id={msg_id})")
-        return msg_id
-
-    embedding = embed_text(clean_content)
-    session2 = session_factory()
-    try:
-        save_embedding(
-            session=session2,
-            source_message_id=msg_id,
-            chunk_text=clean_content,
-            embedding=embedding,
-        )
-        session2.commit()
-    except Exception as exc:
-        session2.rollback()
-        logger.warning(f"임베딩 저장 실패 (message_id={msg_id}): {exc}", exc_info=True)
-    finally:
-        session2.close()
+    else:
+        embedding = embed_text(clean_content)
+        session2 = session_factory()
+        try:
+            save_embedding(
+                session=session2,
+                source_message_id=msg_id,
+                chunk_text=clean_content,
+                embedding=embedding,
+            )
+            session2.commit()
+        except Exception as exc:
+            session2.rollback()
+            logger.warning(f"임베딩 저장 실패 (message_id={msg_id}): {exc}", exc_info=True)
+        finally:
+            session2.close()
 
     # 3단계: thread 청크 갱신 (스레드 메시지이고 ENABLE_THREAD_CHUNKING이면)
     if thread_ts and config.ENABLE_THREAD_CHUNKING:
@@ -639,6 +637,25 @@ def _save_message_and_embed(
             logger.warning(f"Thread 청크 저장 실패 (thread_ts={thread_ts}): {exc}", exc_info=True)
         finally:
             session3.close()
+
+    # 4단계: session 윈도우 청크 갱신 (비스레드 메시지이고 ENABLE_SESSION_CHUNKING이면)
+    if not thread_ts and config.ENABLE_SESSION_CHUNKING:
+        from db.repository import save_session_window_embedding
+        session4 = session_factory()
+        try:
+            save_session_window_embedding(
+                session=session4,
+                channel_id=channel_id,
+                current_message_ts=message_ts,
+                embed_fn=embed_text,
+                window_minutes=config.SESSION_WINDOW_MINUTES,
+            )
+            session4.commit()
+        except Exception as exc:
+            session4.rollback()
+            logger.warning(f"Session 청크 저장 실패 (message_ts={message_ts}): {exc}", exc_info=True)
+        finally:
+            session4.close()
 
     return msg_id
 

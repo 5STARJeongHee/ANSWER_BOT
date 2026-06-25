@@ -202,6 +202,8 @@ def format_context_for_prompt(contexts: list[dict]) -> str:
             role_label = "[스레드 Q&A]"
         elif chunk_type == "conversation":
             role_label = "[채널 Q&A]"
+        elif chunk_type == "session":
+            role_label = "[채널 대화]"
         elif role == "user":
             role_label = "[사람 답변]"
         elif role == "bot":
@@ -210,7 +212,7 @@ def format_context_for_prompt(contexts: list[dict]) -> str:
             role_label = ""
 
         if chunk:
-            max_chars = config.THREAD_CHUNK_MAX_CHARS if chunk_type == "thread" else config.RAG_CHUNK_MAX_CHARS
+            max_chars = config.THREAD_CHUNK_MAX_CHARS if chunk_type in ("thread", "session") else config.RAG_CHUNK_MAX_CHARS
             chunk = chunk[:max_chars]
             header = f"[{i}] (유사도: {similarity:.2f})"
             if role_label:
