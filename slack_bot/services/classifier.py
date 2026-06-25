@@ -45,8 +45,10 @@ _SYSTEM_PROMPT = (
     "- REQUEST: 챗봇 또는 담당자에게 직접 특정 작업·처리·검토를 부탁하는 문장\n"
     "- NONE: 잡담, 공지, 감사 인사, 단순 반응, 완료 보고, "
     "다른 사람에게 답하거나 상황을 설명하는 메시지\n\n"
-    "주의: '배포 완료했습니다', '올렸습니다', '처리했습니다' 등 완료 보고 형태의 메시지는 NONE이다. "
-    "누군가에게 직접 답변하거나 설명하는 형태도 NONE이다.\n"
+    "주의: '배포 완료했습니다', '올렸습니다', '처리했습니다', '패치 올렸습니다', "
+    "'[문서번호: NNN]' 형태의 배포 이력 메시지, '워크스트림에 올렸습니다' 등 "
+    "완료 보고 형태의 메시지는 NONE이다. "
+    "누군가에게 직접 답변하거나 상황을 설명하는 형태도 NONE이다.\n"
     'JSON만 출력: {"category": "QUESTION|REQUEST|NONE", "confidence": 0.0~1.0, "reason": "이유"}'
 )
 
@@ -165,3 +167,47 @@ def extract_topic(message: str) -> Optional[str]:
     if topic:
         logger.debug(f"주제 추출: {topic!r} | 메시지={message[:50]!r}")
     return topic if topic else None
+
+
+def extract_topic_and_product(
+    message: str,
+    products: list[dict],
+) -> tuple[Optional[str], Optional[str]]:
+    """메시지에서 주제와 관련 제품 키를 한 번의 LLM 호출로 추출한다.
+    products: [{"key": "iruda_backend", "name": "이루다 백엔드", "aliases": [...]}]
+    반환: (topic, product_key) — 분류 불가 시 각각 None.
+    """
+    if not message or len(message.strip()) < 10:
+        return None, None
+
+    if products:
+        products_str = "\n".join(
+            f"- {p['key']}: {p['name']} (별칭: {', '.join(p['aliases'][:5])})"
+            for p in products
+        )
+    else:
+        products_str = "(등록된 제품 없음)"
+
+    system_prompt = (
+        "너는 사내 Slack 대화에서 핵심 주제와 관련 제품을 분류하는 분석기다.\n"
+        "핵심 주제를 한국어 2~5단어로 추출하고, "
+        "아래 제품 목록 중 메시지에 명확히 언급된 제품이 있으면 product_key를 반환하라. "
+        "제품이 불확실하거나 언급이 없으면 product는 null로 반환하라.\n\n"
+        f"알려진 제품 목록:\n{products_str}\n\n"
+        'JSON만 출력: {"topic": "핵심 주제", "product": "product_key 또는 null"}'
+    )
+
+    llm_messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"메시지: {message[:500]}"},
+    ]
+    raw = call_classifier(llm_messages)
+    parsed = parse_json_response(raw or "", default={"topic": "", "product": None})
+
+    topic = str(parsed.get("topic", "")).strip() or None
+    product = parsed.get("product")
+    if not isinstance(product, str) or product.lower() in ("null", "none", ""):
+        product = None
+
+    logger.debug(f"주제+제품 추출: topic={topic!r} product={product!r} | 메시지={message[:50]!r}")
+    return topic, product

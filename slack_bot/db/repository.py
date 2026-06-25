@@ -8,7 +8,7 @@ from sqlalchemy import func, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from db.models import BotSetting, ConversationMessage, ContextEmbedding, ContextSummary, MessageFeedback
+from db.models import BotSetting, ConversationMessage, ContextEmbedding, ContextSummary, MessageFeedback, ProductCategory
 import config
 
 logger = logging.getLogger(__name__)
@@ -36,6 +36,7 @@ def upsert_message(
     rag_avg_similarity: Optional[float] = None,
     used_web_search: bool = False,
     topic: Optional[str] = None,
+    product_key: Optional[str] = None,
     force: bool = False,
 ) -> Optional[ConversationMessage]:
     """
@@ -83,6 +84,8 @@ def upsert_message(
         existing.used_web_search = used_web_search
         if topic is not None:
             existing.topic = topic
+        if product_key is not None:
+            existing.product_key = product_key
         session.query(ContextEmbedding).filter(
             ContextEmbedding.source_message_id == existing.id
         ).delete(synchronize_session=False)
@@ -106,6 +109,7 @@ def upsert_message(
         rag_avg_similarity=rag_avg_similarity,
         used_web_search=used_web_search,
         topic=topic,
+        product_key=product_key,
     )
     try:
         session.add(msg)
@@ -1227,3 +1231,125 @@ def save_bot_setting(session: Session, key: str, value: str) -> None:
     else:
         session.add(BotSetting(key=key, value=value, updated_at=datetime.utcnow()))
     session.flush()
+
+
+# ---------------------------------------------------------------------------
+# ProductCategory CRUD
+# ---------------------------------------------------------------------------
+
+_DEFAULT_PRODUCTS = [
+    {"key": "iruda_backend",  "name": "이루다 백엔드",  "aliases": ["iruda", "이루다", "iruda-backend", "이루다백엔드", "이루다 백엔드"]},
+    {"key": "iruda_frontend", "name": "이루다 프론트",  "aliases": ["이루다 프론트", "이루다프론트", "iruda frontend", "이루다 프론트엔드"]},
+    {"key": "bizdata",        "name": "비즈데이터",     "aliases": ["bizdata", "비즈데이터", "비즈메타", "biz data", "bizdatav"]},
+    {"key": "masterstream",   "name": "마스터스트림",   "aliases": ["masterstream", "마스터스트림", "마스터 스트림", "마스터"]},
+    {"key": "metastream",     "name": "메타스트림",     "aliases": ["metastream", "메타스트림", "메타 스트림", "메타"]},
+    {"key": "quality",        "name": "퀄리티스트림",   "aliases": ["quality", "qualitystream", "퀄리티", "퀄리티스트림"]},
+    {"key": "qtrack",         "name": "큐트랙",         "aliases": ["qtrack", "큐트랙", "q-track"]},
+    {"key": "superquery",     "name": "슈퍼쿼리",       "aliases": ["superquery", "슈퍼쿼리", "super-query", "super query"]},
+]
+
+
+def seed_product_categories(session: Session) -> None:
+    """제품 카테고리 기본값을 시딩한다. 이미 레코드가 있으면 건너뛴다."""
+    import json as _json
+    count = session.query(ProductCategory).count()
+    if count > 0:
+        return
+    for p in _DEFAULT_PRODUCTS:
+        session.add(ProductCategory(
+            product_key=p["key"],
+            display_name=p["name"],
+            owner_user_ids_json=_json.dumps([], ensure_ascii=False),
+            aliases_json=_json.dumps(p["aliases"], ensure_ascii=False),
+            question_count=0,
+        ))
+    session.flush()
+    logger.info(f"제품 카테고리 {len(_DEFAULT_PRODUCTS)}개 시딩 완료")
+
+
+def get_all_product_categories(session: Session) -> list[ProductCategory]:
+    """전체 제품 카테고리를 반환한다."""
+    return session.query(ProductCategory).order_by(ProductCategory.product_key).all()
+
+
+def get_product_category(session: Session, product_key: str) -> Optional[ProductCategory]:
+    """제품 키로 카테고리를 조회한다."""
+    return session.query(ProductCategory).filter(ProductCategory.product_key == product_key).first()
+
+
+def find_product_by_alias(session: Session, text: str) -> Optional[ProductCategory]:
+    """텍스트에서 aliases_json을 비교하여 일치하는 제품을 반환한다."""
+    import json as _json
+    text_lower = text.lower()
+    for cat in session.query(ProductCategory).all():
+        aliases = _json.loads(cat.aliases_json or "[]")
+        for alias in aliases:
+            if alias.lower() == text_lower:
+                return cat
+    return None
+
+
+def get_products_as_llm_hints(session: Session) -> list[dict]:
+    """LLM 분류에 전달할 제품 힌트 목록을 반환한다."""
+    import json as _json
+    products = []
+    for cat in get_all_product_categories(session):
+        products.append({
+            "key": cat.product_key,
+            "name": cat.display_name,
+            "aliases": _json.loads(cat.aliases_json or "[]"),
+        })
+    return products
+
+
+def set_product_owners(session: Session, product_key: str, owner_user_ids: list[str]) -> bool:
+    """제품 담당자를 설정한다. 제품이 없으면 False 반환."""
+    import json as _json
+    cat = get_product_category(session, product_key)
+    if not cat:
+        return False
+    cat.owner_user_ids_json = _json.dumps(owner_user_ids, ensure_ascii=False)
+    cat.updated_at = datetime.utcnow()
+    session.flush()
+    return True
+
+
+def get_product_owners(session: Session, product_key: str) -> list[str]:
+    """제품 담당자 목록을 반환한다. 없으면 빈 리스트."""
+    import json as _json
+    cat = get_product_category(session, product_key)
+    if not cat:
+        return []
+    return _json.loads(cat.owner_user_ids_json or "[]")
+
+
+def increment_product_question_count(session: Session, product_key: str) -> None:
+    """제품의 질문 수를 1 증가시킨다."""
+    cat = get_product_category(session, product_key)
+    if cat:
+        cat.question_count += 1
+        cat.updated_at = datetime.utcnow()
+        session.flush()
+
+
+def get_unowned_products_above_threshold(session: Session, threshold: int = 5) -> list[ProductCategory]:
+    """질문 수가 임계값 이상이고 담당자가 없는 제품 목록을 반환한다."""
+    import json as _json
+    candidates = (
+        session.query(ProductCategory)
+        .filter(ProductCategory.question_count >= threshold)
+        .all()
+    )
+    return [
+        c for c in candidates
+        if not _json.loads(c.owner_user_ids_json or "[]")
+    ]
+
+
+def mark_product_notified(session: Session, product_key: str) -> None:
+    """제품의 알림 발송 시각을 현재 시각으로 갱신한다."""
+    cat = get_product_category(session, product_key)
+    if cat:
+        cat.notified_at = datetime.utcnow()
+        cat.updated_at = datetime.utcnow()
+        session.flush()

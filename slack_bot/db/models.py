@@ -1,4 +1,4 @@
-# SQLAlchemy ORM 모델 정의 (conversation_message, context_embedding, context_summary, message_feedback, bot_settings)
+# SQLAlchemy ORM 모델 정의 (conversation_message, context_embedding, context_summary, message_feedback, bot_settings, product_category)
 from datetime import datetime
 
 from sqlalchemy import (
@@ -49,6 +49,7 @@ class ConversationMessage(Base):
     rag_avg_similarity = Column(Float, nullable=True)     # RAG top-k 평균 유사도 (0~1)
     used_web_search = Column(Boolean, default=False)      # 웹 검색 보조 사용 여부
     topic = Column(String(100), nullable=True)            # LLM 추출 핵심 주제 태그 (예: "Redis 연결 오류")
+    product_key = Column(String(50), nullable=True)       # LLM 분류 제품 키 (예: "iruda_backend")
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     __table_args__ = (
@@ -130,6 +131,25 @@ class BotSetting(Base):
 
     def __repr__(self) -> str:
         return f"<BotSetting key={self.key!r}>"
+
+
+class ProductCategory(Base):
+    """제품별 담당자 및 질문 카운트를 저장하는 테이블."""
+
+    __tablename__ = "product_categories"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    product_key = Column(String(50), unique=True, nullable=False, index=True)
+    display_name = Column(String(100), nullable=False)
+    owner_user_ids_json = Column(Text, nullable=False, default="[]")
+    aliases_json = Column(Text, nullable=False, default="[]")
+    question_count = Column(Integer, default=0, nullable=False)
+    notified_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    def __repr__(self) -> str:
+        return f"<ProductCategory key={self.product_key!r} owners={self.owner_user_ids_json}>"
 
 
 class ContextSummary(Base):
@@ -302,6 +322,16 @@ def init_db(engine=None) -> None:
                 conn.commit()
             except Exception:
                 conn.rollback()
+
+    # 제품 분류 컬럼 추가 (fallback 담당자 라우팅용)
+    with engine.connect() as conn:
+        try:
+            conn.execute(
+                text("ALTER TABLE conversation_message ADD COLUMN IF NOT EXISTS product_key VARCHAR(50);")
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
 
     # 피드백 실패 원인 컬럼 추가 (LLM 분류 + 사용자 직접 선택)
     _feedback_cols = [

@@ -340,6 +340,10 @@ def build_intro_blocks() -> dict:
                     "• *`@QNA BOT 요약 주기 설정 [주기]`* — 대화 요약 배치 주기를 변경합니다.\n"
                     "  예시: `매일 3시` `매주 월요일 2시` `매월 1일 2시`\n\n"
                     "• *`@QNA BOT 요약 주기 확인`* — 현재 설정된 요약 배치 주기를 확인합니다.\n\n"
+                    "• *`@QNA BOT 담당자 목록`* — 제품별 담당자 현황을 확인합니다.\n\n"
+                    "• *`@QNA BOT 담당자 설정 [제품키] @담당자1 @담당자2`* — 제품 담당자를 지정합니다.\n"
+                    "  예시: `담당자 설정 iruda_backend @홍길동 @김철수`\n\n"
+                    "• *`@QNA BOT 담당자 삭제 [제품키]`* — 제품 담당자를 초기화합니다.\n\n"
                     "• *`@QNA BOT 소개`* / *`@QNA BOT 도움말`* — 이 안내를 다시 표시합니다."
                 ),
             },
@@ -467,6 +471,7 @@ _THREADS_PER_DAY_LIMIT = 10
 def build_history_blocks(
     grouped: dict[date, list[dict]],
     channel_name: str = "이 채널",
+    days: int = 7,
 ) -> dict:
     """
     날짜별·스레드별 대화 이력을 Block Kit 페이로드로 반환한다.
@@ -552,13 +557,13 @@ def build_history_blocks(
             "elements": [
                 {
                     "type": "mrkdwn",
-                    "text": f":information_source: 최근 7일 · 총 {total_threads}건",
+                    "text": f":information_source: 최근 {days}일 · 총 {total_threads}건",
                 }
             ],
         }
     )
 
-    return {"text": f"{channel_name} 최근 7일 대화 이력 {total_threads}건", "blocks": blocks}
+    return {"text": f"{channel_name} 최근 {days}일 대화 이력 {total_threads}건", "blocks": blocks}
 
 
 # ---------------------------------------------------------------------------

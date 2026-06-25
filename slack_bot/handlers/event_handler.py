@@ -18,8 +18,17 @@ from db.repository import (
     get_dashboard_stats,
     get_recent_fallbacks,
     get_top_topics,
+    seed_product_categories,
+    get_products_as_llm_hints,
+    get_product_owners,
+    set_product_owners,
+    find_product_by_alias,
+    get_all_product_categories,
+    increment_product_question_count,
+    get_unowned_products_above_threshold,
+    mark_product_notified,
 )
-from services.classifier import classify_message, extract_topic, MessageCategory
+from services.classifier import classify_message, extract_topic, extract_topic_and_product, MessageCategory
 from services.context_retriever import retrieve_context, format_context_for_prompt, embed_text
 from services.llm_service import call_qa
 from services.web_search import search_web, format_web_search_for_prompt
@@ -130,10 +139,20 @@ _HISTORY_KEYWORDS = (
 )
 
 
-def _is_history_command(text: str) -> bool:
-    """텍스트가 질문 이력 조회 명령인지 확인한다."""
-    lower = text.strip().lower().replace(" ", "")
-    return any(kw.replace(" ", "") == lower or lower.startswith(kw.replace(" ", "")) for kw in _HISTORY_KEYWORDS)
+def _is_history_command(text: str) -> tuple[bool, int]:
+    """텍스트가 질문 이력 조회 명령인지 확인한다.
+    반환: (is_history: bool, days: int) — 기간 미지정 시 기본값 7일.
+    """
+    stripped = text.strip()
+    lower = stripped.lower()
+    for kw in _HISTORY_KEYWORDS:
+        kw_nospace = kw.replace(" ", "")
+        lower_nospace = lower.replace(" ", "")
+        if lower_nospace == kw_nospace or lower_nospace.startswith(kw_nospace):
+            rest = stripped[len(kw):].strip()
+            days = _parse_backfill_days(rest) if rest else 7
+            return True, days
+    return False, 0
 
 
 # ---------------------------------------------------------------------------
@@ -158,6 +177,154 @@ def _is_dashboard_command(text: str) -> tuple[bool, int]:
             days = _parse_backfill_days(rest) if rest else 7
             return True, days
     return False, 0
+
+
+# ---------------------------------------------------------------------------
+# 담당자 관리 명령 처리
+# ---------------------------------------------------------------------------
+_OWNER_LIST_KEYWORDS = ("담당자 목록", "담당자목록", "owner list", "담당자 리스트", "제품 담당자")
+_OWNER_SET_PREFIX = ("담당자 설정", "담당자설정", "owner set")
+_OWNER_DELETE_PREFIX = ("담당자 삭제", "담당자삭제", "owner delete", "담당자 제거")
+
+_MENTION_RE = re.compile(r"<@([A-Z0-9]+)(?:\|[^>]+)?>")
+
+
+def _parse_owner_command(text: str) -> tuple[str, Optional[str], list[str]]:
+    """담당자 관리 명령을 파싱한다.
+    반환: ("list"|"set"|"delete"|"none", product_key_or_alias, owner_ids)
+    """
+    stripped = text.strip()
+    lower_nospace = stripped.lower().replace(" ", "")
+
+    for kw in _OWNER_LIST_KEYWORDS:
+        if lower_nospace == kw.replace(" ", "") or lower_nospace.startswith(kw.replace(" ", "")):
+            return "list", None, []
+
+    for kw in _OWNER_SET_PREFIX:
+        if lower_nospace.startswith(kw.replace(" ", "")):
+            rest = stripped[len(kw):].strip()
+            parts = rest.split()
+            if not parts:
+                return "set", None, []
+            product_identifier = parts[0]
+            owner_ids = _MENTION_RE.findall(rest)
+            return "set", product_identifier, owner_ids
+
+    for kw in _OWNER_DELETE_PREFIX:
+        if lower_nospace.startswith(kw.replace(" ", "")):
+            rest = stripped[len(kw):].strip().split()
+            product_identifier = rest[0] if rest else None
+            return "delete", product_identifier, []
+
+    return "none", None, []
+
+
+def _handle_owner_command(
+    client,
+    channel_id: str,
+    thread_ts: Optional[str],
+    question: str,
+    session_factory,
+) -> bool:
+    """담당자 관리 명령을 처리한다. 처리 시 True, 아니면 False 반환."""
+    import json as _json
+    action, product_identifier, owner_ids = _parse_owner_command(question)
+    if action == "none":
+        return False
+
+    session = session_factory()
+    try:
+        if action == "list":
+            cats = get_all_product_categories(session)
+            if not cats:
+                post_message(client=client, channel=channel_id, thread_ts=thread_ts,
+                             text="등록된 제품이 없습니다.")
+                return True
+            lines = ["*제품 담당자 목록*"]
+            for c in cats:
+                owners = _json.loads(c.owner_user_ids_json or "[]")
+                owner_str = " ".join(f"<@{u}>" for u in owners) if owners else "_미지정_"
+                lines.append(f"• `{c.product_key}` ({c.display_name}) — {owner_str} · 질문 {c.question_count}건")
+            post_message(client=client, channel=channel_id, thread_ts=thread_ts,
+                         text="\n".join(lines))
+            return True
+
+        if product_identifier is None:
+            post_message(client=client, channel=channel_id, thread_ts=thread_ts,
+                         text="제품 키를 입력해주세요. 예: `담당자 설정 iruda_backend @담당자`")
+            return True
+
+        from db.repository import get_product_category as _get_cat
+        cat = _get_cat(session, product_identifier)
+        if cat is None:
+            cat = find_product_by_alias(session, product_identifier)
+        if cat is None:
+            post_message(client=client, channel=channel_id, thread_ts=thread_ts,
+                         text=f"제품 `{product_identifier}`을 찾을 수 없습니다. `담당자 목록`으로 확인하세요.")
+            return True
+
+        if action == "set":
+            if not owner_ids:
+                post_message(client=client, channel=channel_id, thread_ts=thread_ts,
+                             text="담당자를 @멘션으로 지정해주세요. 예: `담당자 설정 iruda_backend @담당자1 @담당자2`")
+                return True
+            set_product_owners(session, cat.product_key, owner_ids)
+            session.commit()
+            mention_str = " ".join(f"<@{u}>" for u in owner_ids)
+            post_message(client=client, channel=channel_id, thread_ts=thread_ts,
+                         text=f"`{cat.display_name}` 담당자가 {mention_str} 으로 설정되었습니다.")
+        elif action == "delete":
+            set_product_owners(session, cat.product_key, [])
+            session.commit()
+            post_message(client=client, channel=channel_id, thread_ts=thread_ts,
+                         text=f"`{cat.display_name}` 담당자가 제거되었습니다.")
+        return True
+    finally:
+        session.close()
+
+
+def _notify_admin_unowned_products(client, session_factory) -> None:
+    """담당자 미지정 제품 중 질문이 임계값 이상이면 관리자에게 DM을 보낸다."""
+    import json as _json
+    if not config.BACKFILL_ADMIN_USER_IDS:
+        return
+
+    session = session_factory()
+    try:
+        candidates = get_unowned_products_above_threshold(session, threshold=5)
+        notifiable = []
+        import datetime
+        for c in candidates:
+            if c.notified_at is None or (
+                datetime.datetime.utcnow() - c.notified_at
+            ).total_seconds() > 86400:
+                notifiable.append(c)
+
+        if not notifiable:
+            return
+
+        lines = [":bell: *담당자 지정 요청*\n아래 제품에 5건 이상 질문이 쌓였습니다. 담당자를 지정해 주세요."]
+        for c in notifiable:
+            lines.append(f"• `{c.product_key}` ({c.display_name}) — 질문 {c.question_count}건")
+        lines.append("\n`@QNA BOT 담당자 설정 [제품키] @담당자1 @담당자2` 로 지정하세요.")
+        msg = "\n".join(lines)
+
+        for admin_id in config.BACKFILL_ADMIN_USER_IDS:
+            try:
+                resp = client.conversations_open(users=[admin_id])
+                dm_channel = resp["channel"]["id"]
+                client.chat_postMessage(channel=dm_channel, text=msg)
+                logger.info(f"관리자 DM 발송: admin={admin_id} products={[c.product_key for c in notifiable]}")
+            except Exception as e:
+                logger.warning(f"관리자 DM 실패: admin={admin_id} error={e}")
+
+        for c in notifiable:
+            mark_product_notified(session, c.product_key)
+        session.commit()
+    except Exception as e:
+        logger.warning(f"관리자 알림 처리 중 오류: {e}")
+    finally:
+        session.close()
 
 
 # ---------------------------------------------------------------------------
@@ -475,7 +642,8 @@ _QA_SYSTEM_PROMPT = (
     "[참고 컨텍스트 - 과거 관련 대화] 섹션에서 [사람 답변]으로 표시된 내용을 "
     "가장 신뢰할 수 있는 근거로 우선 참고하라.\n"
     "모르는 내용은 추측하지 말고 '확인이 필요합니다'라고 답하라.\n"
-    "답변은 2~5문장 내로 핵심만 전달하라.\n"
+    "답변 길이: 설정 절차·코드·파일 경로가 필요한 기술 질문은 단계별 목록과 코드블록을 포함하라. "
+    "그 외에는 3~5문장으로 핵심만 전달하라.\n"
     "AI 생성 답변임을 사용자가 인지할 수 있도록 답변 끝에 '[AI 생성 답변]'을 덧붙인다."
 )
 
@@ -488,7 +656,8 @@ _QA_SYSTEM_PROMPT_WITH_WEB = (
     "② [과거 관련 대화]의 [봇 답변] — 이전 AI 답변으로 참고할 수 있다. "
     "③ [웹 검색 결과] — 과거 대화만으로 답하기 어려울 때만 보조로 활용하라.\n"
     "해당 결과가 질문을 직접 뒷받침하지 못할 때만 '확인이 필요합니다'라고 답하라.\n"
-    "답변은 2~5문장 내로 핵심만 전달하라.\n"
+    "답변 길이: 설정 절차·코드·파일 경로가 필요한 기술 질문은 단계별 목록과 코드블록을 포함하라. "
+    "그 외에는 3~5문장으로 핵심만 전달하라.\n"
     "AI 생성 답변임을 사용자가 인지할 수 있도록 답변 끝에 '[AI 생성 답변]'을 덧붙인다."
 )
 
@@ -551,6 +720,7 @@ def _save_message_and_embed(
     rag_avg_similarity: Optional[float] = None,
     used_web_search: bool = False,
     topic: Optional[str] = None,
+    product_key: Optional[str] = None,
 ) -> Optional[int]:
     """
     메시지를 저장하고 임베딩을 생성한다.
@@ -583,6 +753,7 @@ def _save_message_and_embed(
             rag_avg_similarity=rag_avg_similarity,
             used_web_search=used_web_search,
             topic=topic,
+            product_key=product_key,
         )
         if msg is None:
             session.commit()
@@ -674,6 +845,7 @@ def _process_question(
     rag_channel_id=_RAG_CHANNEL_DEFAULT,
     image_context: Optional[str] = None,
     show_thread_tip: bool = False,
+    product_key: Optional[str] = None,
 ) -> None:
     """
     LLM으로 질문에 답변을 생성하고 Slack에 전송한다.
@@ -781,11 +953,20 @@ def _process_question(
         can_answer = _evaluate_answer(question, answer)
         if not can_answer:
             logger.info(f"Fallback 판단: 답변 불확실 (question={question[:50]!r})")
+            # 제품 담당자 조회 (product_key가 있는 경우)
+            _fallback_owners: list[str] = []
+            if product_key:
+                _owner_session = session_factory()
+                try:
+                    _fallback_owners = get_product_owners(_owner_session, product_key)
+                finally:
+                    _owner_session.close()
             send_fallback_message(
                 client=client,
                 channel=channel_id,
                 thread_ts=thread_ts,
                 question=question,
+                fallback_user_ids=_fallback_owners,
                 thinking_ts=thinking_ts,
             )
             # Fallback 이력 저장
@@ -886,6 +1067,14 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
     session_factory는 스레드 안전한 scoped_session이어야 한다.
     bot_user_id는 main.py에서 auth_test()로 획득해 전달한다.
     """
+    # 제품 카테고리 기본값 시딩 (테이블이 비어 있는 경우에만)
+    try:
+        _seed_session = session_factory()
+        seed_product_categories(_seed_session)
+        _seed_session.commit()
+        _seed_session.close()
+    except Exception as _seed_err:
+        logger.warning(f"제품 카테고리 시딩 실패: {_seed_err}")
 
     @app.event("app_mention")
     def handle_mention(event, client, ack, say):
@@ -955,15 +1144,16 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
         # ────────────────────────────────────────────────────────────────────
 
         # ── 히스토리 명령 감지 ──────────────────────────────────────────────
-        if _is_history_command(question):
-            logger.info(f"히스토리 명령 수신: user={user_id} channel={channel_id}")
+        is_history, history_days = _is_history_command(question)
+        if is_history:
+            logger.info(f"히스토리 명령 수신: user={user_id} channel={channel_id} days={history_days}")
 
             def history_worker():
                 hist_session = session_factory()
                 try:
-                    grouped = get_channel_history_by_date(hist_session, channel_id, days=7)
+                    grouped = get_channel_history_by_date(hist_session, channel_id, days=history_days)
                     channel_label = f"<#{channel_id}>"
-                    payload = build_history_blocks(grouped, channel_label)
+                    payload = build_history_blocks(grouped, channel_label, days=history_days)
                     post_message(
                         client=client,
                         channel=channel_id,
@@ -1005,6 +1195,17 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
                     dash_session.close()
 
             threading.Thread(target=dashboard_worker, daemon=True).start()
+            return
+        # ────────────────────────────────────────────────────────────────────
+
+        # ── 담당자 관리 명령 감지 ────────────────────────────────────────────
+        if _parse_owner_command(question)[0] != "none":
+            logger.info(f"담당자 관리 명령 수신: user={user_id}")
+            threading.Thread(
+                target=_handle_owner_command,
+                args=(client, channel_id, thread_ts, question, session_factory),
+                daemon=True,
+            ).start()
             return
         # ────────────────────────────────────────────────────────────────────
 
@@ -1094,6 +1295,14 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
                     f"[첨부 이미지 분석]\n{image_context}\n\n{question}".strip()
                 )
 
+            # 제품 힌트 조회 + 주제/제품 LLM 분류 (단일 호출)
+            _prod_session = session_factory()
+            try:
+                _products = get_products_as_llm_hints(_prod_session)
+            finally:
+                _prod_session.close()
+            _topic, _product_key = extract_topic_and_product(effective_question, _products)
+
             _save_message_and_embed(
                 session_factory=session_factory,
                 event_id=event_id,
@@ -1105,8 +1314,23 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
                 content=effective_question,
                 is_question=True,
                 prompt_tokens=estimate_tokens(effective_question),
-                topic=extract_topic(effective_question),
+                topic=_topic,
+                product_key=_product_key,
             )
+
+            # 제품 질문 카운트 증가 + 담당자 미지정 시 관리자 알림
+            if _product_key:
+                _cnt_session = session_factory()
+                try:
+                    increment_product_question_count(_cnt_session, _product_key)
+                    _cnt_session.commit()
+                finally:
+                    _cnt_session.close()
+                threading.Thread(
+                    target=_notify_admin_unowned_products,
+                    args=(client, session_factory),
+                    daemon=True,
+                ).start()
 
             # 스레드 문맥 조회 및 요약
             thread_summary = None
@@ -1129,6 +1353,7 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
                 thread_summary=thread_summary,
                 image_context=image_context or None,
                 show_thread_tip=is_new_thread,
+                product_key=_product_key,
             )
 
         threading.Thread(target=worker, daemon=True).start()
@@ -1196,6 +1421,13 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
             # DM은 멘션·분류기·스레드 작성자 체크 없이 모든 메시지를 질문으로 처리한다.
             # RAG 검색은 전체 채널 대상으로 수행한다 (rag_channel_id=None).
             if is_dm:
+                _dm_prod_session = session_factory()
+                try:
+                    _dm_products = get_products_as_llm_hints(_dm_prod_session)
+                finally:
+                    _dm_prod_session.close()
+                _dm_topic, _dm_product_key = extract_topic_and_product(effective_content, _dm_products)
+
                 _save_message_and_embed(
                     session_factory=session_factory,
                     event_id=event_id,
@@ -1206,7 +1438,8 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
                     role="user",
                     content=effective_content,
                     is_question=True,
-                    topic=extract_topic(effective_content),
+                    topic=_dm_topic,
+                    product_key=_dm_product_key,
                 )
 
                 user_name = get_user_display_name(client, user_id) if user_id else "익명"
@@ -1226,6 +1459,7 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
                     thinking_ts=thinking_ts,
                     rag_channel_id=None,
                     image_context=image_ctx or None,
+                    product_key=_dm_product_key,
                 )
                 return
 
@@ -1302,7 +1536,14 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
             )
 
             from utils.token_counter import estimate_tokens
-            _topic = extract_topic(effective_content) if classify_result.is_actionable else None
+            _topic, _product_key = None, None
+            if classify_result.is_actionable:
+                _ch_prod_session = session_factory()
+                try:
+                    _ch_products = get_products_as_llm_hints(_ch_prod_session)
+                finally:
+                    _ch_prod_session.close()
+                _topic, _product_key = extract_topic_and_product(effective_content, _ch_products)
             _save_message_and_embed(
                 session_factory=session_factory,
                 event_id=event_id,
@@ -1315,6 +1556,14 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
                 is_question=classify_result.is_actionable,
                 prompt_tokens=estimate_tokens(effective_content),
                 topic=_topic,
+                product_key=_product_key,
             )
+            if _product_key:
+                _ch_cnt_session = session_factory()
+                try:
+                    increment_product_question_count(_ch_cnt_session, _product_key)
+                    _ch_cnt_session.commit()
+                finally:
+                    _ch_cnt_session.close()
 
         threading.Thread(target=worker, daemon=True).start()

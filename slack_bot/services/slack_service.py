@@ -308,7 +308,7 @@ def send_fallback_message(
     fallback 이력은 호출자가 DB에 기록한다.
     """
     if fallback_user_ids is None:
-        fallback_user_ids = config.FALLBACK_MENTION_USER_IDS
+        fallback_user_ids = []
 
     payload = build_fallback_blocks(
         question=question,

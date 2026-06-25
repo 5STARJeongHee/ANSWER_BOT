@@ -156,7 +156,7 @@ SESSION_WINDOW_MINUTES: int = int(os.getenv("SESSION_WINDOW_MINUTES", "5"))
 MAX_CONTEXT_TOKENS: int = int(os.getenv("MAX_CONTEXT_TOKENS", "6000"))
 MAX_RETRIES: int = int(os.getenv("MAX_RETRIES", "3"))
 CLASSIFIER_MAX_TOKENS: int = 80
-QA_MAX_TOKENS: int = 500
+QA_MAX_TOKENS: int = int(os.getenv("QA_MAX_TOKENS", "800"))
 SUMMARY_MAX_TOKENS: int = 300
 
 # --- 웹 검색 설정 ---
