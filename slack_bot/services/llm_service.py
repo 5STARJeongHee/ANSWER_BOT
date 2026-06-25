@@ -166,6 +166,42 @@ def call_vision(images_b64: list[str], prompt: str) -> Optional[str]:
     )
 
 
+_FEEDBACK_REASONS = frozenset({"wrong_source", "hallucination", "out_of_scope", "format_issue"})
+
+
+def call_feedback_classifier(question: str, answer: str) -> str:
+    """
+    질문과 봇 답변을 분석해 부정 피드백 원인을 4가지 카테고리 중 하나로 분류한다.
+    분류 실패 시 'unknown'을 반환한다.
+    """
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You classify why a chatbot answer was bad. "
+                "Reply with JSON: {\"reason\": \"<category>\"}. "
+                "Categories: wrong_source (factually wrong), hallucination (fabricated info), "
+                "out_of_scope (outside knowledge domain), format_issue (correct but poorly expressed)."
+            ),
+        },
+        {
+            "role": "user",
+            "content": f"Question: {question[:500]}\nAnswer: {answer[:1000]}",
+        },
+    ]
+    raw = call_with_fallback(
+        model_chain=config.CLASSIFIER_FALLBACK_CHAIN,
+        messages=messages,
+        max_tokens=30,
+        response_format={"type": "json_object"},
+    )
+    if not raw:
+        return "unknown"
+    parsed = parse_json_response(raw, {})
+    reason = parsed.get("reason", "unknown")
+    return reason if reason in _FEEDBACK_REASONS else "unknown"
+
+
 def parse_json_response(raw: str, default: dict) -> dict:
     """
     LLM 응답에서 JSON을 파싱한다.

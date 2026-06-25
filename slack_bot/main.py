@@ -60,9 +60,54 @@ def main() -> None:
     logger.info("이벤트 핸들러 등록 완료")
 
     # 4-1. 리액션 핸들러 등록 (👍/👎 피드백 수집, reactions:read 스코프 필요)
-    from ui.reaction_handler import register_reaction_handlers
+    from ui.reaction_handler import register_reaction_handlers, _VOTE_BUTTONS
     register_reaction_handlers(app=app, session_factory=session_factory, bot_user_id=bot_user_id)
     logger.info("리액션 핸들러 등록 완료")
+
+    # 4-2. 부정 피드백 투표 버튼 핸들러 등록 (block_actions)
+    _vote_action_map = {action_id: value for action_id, value, _ in _VOTE_BUTTONS}
+
+    def _make_vote_handler(reason_value: str):
+        def handle_feedback_vote(ack, body, client, action) -> None:
+            ack()
+            voter_id: str = body["user"]["id"]
+            original_ts: str = action.get("value", "")
+            channel: str = (body.get("channel") or {}).get("id", "")
+
+            if not original_ts or not channel:
+                return
+
+            from db.repository import update_feedback_failure_reason
+            session = session_factory()
+            try:
+                update_feedback_failure_reason(
+                    session,
+                    message_ts=original_ts,
+                    user_id=voter_id,
+                    user_reason=reason_value,
+                )
+                session.commit()
+                logger.info(f"사용자 피드백 원인 저장: user={voter_id} reason={reason_value} ts={original_ts}")
+            except Exception as exc:
+                session.rollback()
+                logger.error(f"사용자 피드백 원인 저장 실패: {exc}", exc_info=True)
+            finally:
+                session.close()
+
+            try:
+                client.chat_update(
+                    channel=channel,
+                    ts=body["message"]["ts"],
+                    text="소중한 피드백 감사합니다.",
+                    blocks=[],
+                )
+            except Exception:
+                pass
+        return handle_feedback_vote
+
+    for _action_id, _reason_value, _ in _VOTE_BUTTONS:
+        app.action(_action_id)(_make_vote_handler(_reason_value))
+    logger.info("부정 피드백 투표 핸들러 등록 완료")
 
     # 5. APScheduler 시작
     from batch.scheduler import create_scheduler

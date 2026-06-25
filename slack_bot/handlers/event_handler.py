@@ -826,7 +826,7 @@ def _process_question(
             event_id=None,
             channel_id=channel_id,
             thread_ts=thread_ts,
-            message_ts=f"bot_{message_ts}",
+            message_ts=sent_ts or f"bot_{message_ts}",
             user_id=None,
             role="bot",
             content=answer,

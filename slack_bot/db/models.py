@@ -103,6 +103,8 @@ class MessageFeedback(Base):
     user_id = Column(String(20), nullable=False)
     reaction = Column(String(50), nullable=False)   # thumbsup, thumbsdown 등
     sentiment = Column(String(10), nullable=False)  # positive | negative
+    llm_failure_reason = Column(String(30), nullable=True)   # wrong_source|hallucination|out_of_scope|format_issue
+    user_failure_reason = Column(String(30), nullable=True)  # 사용자가 직접 선택한 실패 원인
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     __table_args__ = (
@@ -297,6 +299,19 @@ def init_db(engine=None) -> None:
                         "ON context_embedding USING gin (chunk_text gin_trgm_ops);"
                     )
                 )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+
+    # 피드백 실패 원인 컬럼 추가 (LLM 분류 + 사용자 직접 선택)
+    _feedback_cols = [
+        "ALTER TABLE message_feedback ADD COLUMN IF NOT EXISTS llm_failure_reason VARCHAR(30);",
+        "ALTER TABLE message_feedback ADD COLUMN IF NOT EXISTS user_failure_reason VARCHAR(30);",
+    ]
+    with engine.connect() as conn:
+        for stmt in _feedback_cols:
+            try:
+                conn.execute(text(stmt))
                 conn.commit()
             except Exception:
                 conn.rollback()

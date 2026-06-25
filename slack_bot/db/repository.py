@@ -709,6 +709,140 @@ def save_feedback(
         return None
 
 
+def get_bot_message_with_question(
+    session: Session,
+    channel_id: str,
+    message_ts: str,
+) -> tuple[Optional[ConversationMessage], Optional[ConversationMessage]]:
+    """
+    봇 답변 ts로 봇 메시지와 같은 스레드의 직전 사용자 질문을 반환한다.
+    (bot_msg, question_msg) 형태로 반환하며, 없으면 해당 요소가 None이다.
+    """
+    bot_msg = (
+        session.query(ConversationMessage)
+        .filter(
+            ConversationMessage.channel_id == channel_id,
+            ConversationMessage.message_ts == message_ts,
+            ConversationMessage.role == "bot",
+        )
+        .first()
+    )
+    if not bot_msg:
+        return None, None
+
+    thread_filter = (
+        ConversationMessage.thread_ts == bot_msg.thread_ts
+        if bot_msg.thread_ts
+        else ConversationMessage.channel_id == channel_id
+    )
+    question_msg = (
+        session.query(ConversationMessage)
+        .filter(
+            ConversationMessage.channel_id == channel_id,
+            thread_filter,
+            ConversationMessage.role == "user",
+            ConversationMessage.is_question.is_(True),
+        )
+        .order_by(ConversationMessage.created_at.desc())
+        .first()
+    )
+    return bot_msg, question_msg
+
+
+def update_feedback_failure_reason(
+    session: Session,
+    *,
+    message_ts: str,
+    user_id: str,
+    llm_reason: Optional[str] = None,
+    user_reason: Optional[str] = None,
+) -> bool:
+    """
+    기존 피드백 행의 실패 원인을 갱신한다. 갱신 성공 시 True를 반환한다.
+    llm_reason, user_reason 중 전달된 것만 덮어쓴다.
+    """
+    fb = (
+        session.query(MessageFeedback)
+        .filter(
+            MessageFeedback.message_ts == message_ts,
+            MessageFeedback.user_id == user_id,
+            MessageFeedback.sentiment == "negative",
+        )
+        .first()
+    )
+    if not fb:
+        return False
+    if llm_reason is not None:
+        fb.llm_failure_reason = llm_reason
+    if user_reason is not None:
+        fb.user_failure_reason = user_reason
+    session.flush()
+    return True
+
+
+def save_qa_feedback_embedding(
+    session_factory,
+    *,
+    bot_msg_id: int,
+    question_text: str,
+    answer_text: str,
+) -> bool:
+    """
+    긍정 피드백을 받은 봇 답변을 Q:/A: QA 쌍으로 임베딩하여 저장한다.
+    이미 qa_feedback 청크가 존재하면 중복 저장하지 않는다.
+    """
+    import json
+
+    from services.context_retriever import embed_text
+
+    session = session_factory()
+    try:
+        already = (
+            session.query(ContextEmbedding)
+            .filter(
+                ContextEmbedding.source_message_id == bot_msg_id,
+                ContextEmbedding.chunk_type == "qa_feedback",
+            )
+            .first()
+        )
+        if already:
+            return False
+
+        chunk_text = f"Q: {question_text.strip()}\nA: {answer_text.strip()}"
+        embedding = embed_text(chunk_text)
+
+        emb = ContextEmbedding(
+            source_message_id=bot_msg_id,
+            chunk_text=chunk_text,
+            chunk_type="qa_feedback",
+            embedding_json=json.dumps(embedding) if embedding else None,
+        )
+        session.add(emb)
+        session.flush()
+
+        if config.ENABLE_VECTOR_SEARCH and embedding:
+            vec_str = "[" + ",".join(str(v) for v in embedding) + "]"
+            try:
+                session.execute(text("SAVEPOINT qa_feedback_vec"))
+                session.execute(
+                    text("UPDATE context_embedding SET embedding = CAST(:vec AS vector) WHERE id = :id"),
+                    {"vec": vec_str, "id": emb.id},
+                )
+                session.execute(text("RELEASE SAVEPOINT qa_feedback_vec"))
+            except Exception as exc:
+                session.execute(text("ROLLBACK TO SAVEPOINT qa_feedback_vec"))
+                logger.warning(f"QA 피드백 pgvector 저장 실패 (fallback JSON 유지): {exc}")
+
+        session.commit()
+        return True
+    except Exception as exc:
+        session.rollback()
+        logger.error(f"QA 피드백 임베딩 저장 실패: {exc}", exc_info=True)
+        return False
+    finally:
+        session.close()
+
+
 def get_latest_summary(
     session: Session,
     channel_id: str,
