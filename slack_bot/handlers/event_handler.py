@@ -1275,7 +1275,8 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
                     )
                     return
 
-            # 분류기 실행
+            # 채널 메시지는 저장만 수행한다. 응답은 app_mention(@멘션)에서만 처리한다.
+            # 분류기는 is_question 플래그 품질 유지를 위해 실행한다.
             classify_result = classify_message(
                 message=raw_text,
                 is_mention=False,
@@ -1297,34 +1298,6 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
                 is_question=classify_result.is_actionable,
                 prompt_tokens=estimate_tokens(effective_content),
                 topic=_topic,
-            )
-
-            if not classify_result.is_actionable:
-                return
-
-            user_name = get_user_display_name(client, user_id) if user_id else "익명"
-            thinking_ts = post_thinking_indicator(
-                client=client, channel=channel_id, thread_ts=thread_ts or message_ts
-            )
-
-            thread_summary = None
-            if thread_ts:
-                thread_msgs = fetch_thread_history(client, channel_id, thread_ts, limit=20)
-                if thread_msgs and len(thread_msgs) >= 3:
-                    thread_summary = summarize_thread_context(thread_msgs[:-1])
-
-            _process_question(
-                client=client,
-                channel_id=channel_id,
-                thread_ts=thread_ts or message_ts,
-                message_ts=message_ts,
-                question=effective_content,
-                user_id=user_id,
-                user_name=user_name,
-                session_factory=session_factory,
-                thinking_ts=thinking_ts,
-                thread_summary=thread_summary,
-                image_context=image_ctx or None,
             )
 
         threading.Thread(target=worker, daemon=True).start()
