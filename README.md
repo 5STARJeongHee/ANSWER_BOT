@@ -106,7 +106,7 @@ docker-stop.bat    # 종료
 | `DATABASE_URL` | ✅ (conda) | 외부 DB 직접 연결 시 | — |
 | `LLM_BACKEND` | — | LLM 백엔드 (`openrouter` / `ollama`) | `openrouter` |
 | `BACKFILL_ADMIN_USER_IDS` | — | 백필 명령 허용 사용자 ID (쉼표 구분, 비어 있으면 전체 허용) | — |
-| `FALLBACK_MENTION_USER_IDS` | — | 에스컬레이션 담당자 ID | — |
+| `FALLBACK_MENTION_USER_IDS` | — | 에스컬레이션 기본 담당자 ID (DB 제품 담당자 미등록 시 폴백) | — |
 | `ENABLE_VECTOR_SEARCH` | — | pgvector 사용 여부 | `true` |
 | `ENABLE_HYBRID_SEARCH` | — | 키워드+벡터 Hybrid Search | `true` |
 | `ENABLE_RERANKING` | — | Cross-Encoder Reranking 활성화 | `true` |
@@ -285,10 +285,11 @@ SLACK_BOT/
 │   │   ├── message_blocks.py     # Block Kit 컴포넌트 (답변·히스토리·대시보드)
 │   │   └── reaction_handler.py   # 이모지 피드백 처리
 │   └── utils/
-│       ├── file_processor.py     # xlsx/docx/pdf/txt 등 파일 텍스트 추출
-│       ├── image_processor.py    # Vision 모델 이미지 분석
-│       ├── pii_filter.py         # PII 마스킹
-│       └── token_counter.py      # 토큰 예산 관리
+│       ├── conversation_grouper.py # 채널 메시지 5분 슬라이딩 윈도우 세션 청킹
+│       ├── file_processor.py       # xlsx/docx/pdf/txt 등 파일 텍스트 추출
+│       ├── image_processor.py      # Vision 모델 이미지 분석
+│       ├── pii_filter.py           # PII 마스킹
+│       └── token_counter.py        # 토큰 예산 관리
 ├── db-init/
 │   └── 01-init.sql           # 전체 스키마 초기화 스크립트 (Docker 첫 기동 시 1회 실행)
 ├── docs/                     # 설정 가이드, 아키텍처 문서

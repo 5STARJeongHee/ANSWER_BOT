@@ -1,6 +1,6 @@
 # 프로젝트 현황 — QNA BOT (Slack 사내 챗봇)
 
-> 최종 업데이트: 2026-06-22
+> 최종 업데이트: 2026-06-29
 
 ---
 
@@ -33,6 +33,15 @@
 | UI/UX | Slack Block Kit 메시지 컴포넌트 (`slack_bot/ui/`) | ✅ 완료 |
 | 테스트 | 단위 테스트 109개 (100% PASS) | ✅ 완료 |
 | 문서 | Supabase 설정 가이드, Slack 앱 설정 가이드, QA 리포트 | ✅ 완료 |
+| 제품 담당자 DB 관리 | `product_categories` 테이블 + 봇 명령 (`담당자 설정/삭제/목록`) | ✅ 완료 |
+| 알림 관리자 DB 관리 | `bot_settings` 테이블 + 봇 명령 (`알림관리자 추가/삭제/목록`) | ✅ 완료 |
+| 피드백 루프 강화 | 긍정 QA 임베딩, 부정 LLM 분류, 사용자 투표 (llm_failure_reason / user_failure_reason) | ✅ 완료 |
+| 주제 태그 Stage 2 | LLM 한 번 호출로 자유 텍스트 topic canonical 통합 (`batch/topic_normalizer.py`) | ✅ 완료 |
+| 세션 윈도우 임베딩 | 비스레드 채널 메시지 5분 슬라이딩 윈도우 청킹 (`utils/conversation_grouper.py`) | ✅ 완료 |
+| 요약 주기 설정 명령 | 봇 명령으로 APScheduler 요약 주기 동적 변경 | ✅ 완료 |
+| 정규화 즉시 실행 명령 | `@QNA BOT 정규화 실행`으로 배치 즉시 트리거 (중복 실행 방지) | ✅ 완료 |
+| 히스토리 기간 옵션 | `@QNA BOT 히스토리 30일` 등 기간 인자 지원 | ✅ 완료 |
+| 제품 키 분류 | conversation_message.product_key 컬럼으로 메시지별 제품 분류 기록 | ✅ 완료 |
 
 ---
 
@@ -40,9 +49,8 @@
 
 | 항목 | 설명 | 우선순위 |
 |------|------|---------|
-| **주제 태그 Stage 2** | 임베딩 기반 유사 topic 클러스터링 + canonical 주제명 정규화 배치 (`batch/topic_normalizer.py` stub 존재). 채널당 200건 이상 topic이 쌓인 후 활성화. | 높음 |
-| **히스토리 그룹핑** | Stage 2 완료 후 canonical 주제별로 이력을 그룹핑하여 표시. 같은 주제의 과거 Q&A 요약 제공. | 높음 |
-| **RAG + 주제 통합** | 안정된 canonical 주제로 RAG 결과 재순위 또는 보조 필터 적용. Stage 1의 자유 텍스트 태그는 부정확하므로 Stage 2 이후 단계에서 도입. | 중간 |
+| **히스토리 그룹핑** | canonical 주제별로 이력을 그룹핑하여 표시. 같은 주제의 과거 Q&A 요약 제공. | 높음 |
+| **RAG + 주제 통합** | 정규화된 canonical 주제로 RAG 결과 재순위 또는 보조 필터 적용. | 중간 |
 | **같은 주제 과거 Q&A 제시** | 질문 답변 시 같은 canonical 주제의 과거 Q&A 요약 블록을 부가 정보로 제공. | 중간 |
 | **모니터링** | Prometheus metrics 또는 Slack 알림 추가 (봇 장애, rate limit 이벤트 알림). | 낮음 |
 | **분류기 캐시 분산화** | 인메모리 LRU 256개 → Redis (다중 인스턴스 환경에서 캐시 공유). | 낮음 |
@@ -62,10 +70,14 @@ Slack (Socket Mode)
 event_handler.py   ← 이벤트 수신, 3초 ack 후 스레드 처리
       │
       ├─► 명령어 라우팅 ─────────────────────────────────────
-      │     ├── 소개/도움말  → build_intro_blocks()
-      │     ├── 히스토리     → get_channel_question_history() → build_history_blocks()
-      │     ├── 대시보드     → get_dashboard_stats() + get_top_topics() → build_dashboard_blocks()
-      │     └── 백필         → backfill_channel() (백그라운드 스레드)
+      │     ├── 소개/도움말       → build_intro_blocks()
+      │     ├── 히스토리 [기간]   → get_channel_question_history() → build_history_blocks()
+      │     ├── 대시보드 [기간]   → get_dashboard_stats() + get_top_topics() → build_dashboard_blocks()
+      │     ├── 백필 [기간]       → backfill_channel() (백그라운드 스레드)
+      │     ├── 담당자 설정/삭제/목록 → _handle_owner_command() → product_categories 테이블
+      │     ├── 알림관리자 추가/삭제/목록 → _handle_notification_admin_command() → bot_settings 테이블
+      │     ├── 요약 주기 설정/확인  → update_summary_schedule() (APScheduler 동적 변경)
+      │     └── 정규화 실행       → run_normalize() (백그라운드 스레드, 중복 실행 방지)
       │
       ├─► classifier.py        ← 메시지 분류 (QUESTION/REQUEST/NONE) + extract_topic()
       ├─► image_processor.py   ← Vision 모델 이미지 분석
@@ -81,8 +93,10 @@ event_handler.py   ← 이벤트 수신, 3초 ack 후 스레드 처리
         ui/reaction_handler.py ← 이모지 반응 / 피드백 처리
 
 batch/collector.py        ← 증분 백필 (미수집 과거 구간, 중단 후 재개)
-batch/scheduler.py        ← APScheduler 주간 요약 배치
-batch/topic_normalizer.py ← 주제 태그 배치 정규화 (Stage 2, 미구현)
+batch/categorizer.py      ← 미처리 메시지 topic/is_question 보정 배치
+batch/scheduler.py        ← APScheduler 배치 등록 + 주기 동적 변경
+batch/topic_normalizer.py ← 자유 텍스트 topic → canonical 통합 배치 (Stage 2, 구현 완료)
+utils/conversation_grouper.py ← 채널 메시지 5분 슬라이딩 윈도우 세션 청킹
 ```
 
 ---
@@ -103,13 +117,14 @@ batch/topic_normalizer.py ← 주제 태그 배치 정규화 (Stage 2, 미구현
 | content | TEXT | PII 마스킹된 메시지 본문 |
 | is_question | BOOLEAN | 분류기 판단 결과 |
 | is_fallback | BOOLEAN | Fallback 발동 여부 |
-| category | VARCHAR(20) | QUESTION / REQUEST / NONE |
+| category | VARCHAR(20) | 레거시 — is_question으로 대체됨 |
 | response_time_ms | INTEGER | 봇 응답 생성 소요 시간 (ms) |
 | prompt_tokens | INTEGER | LLM 입력 추정 토큰 |
 | completion_tokens | INTEGER | LLM 출력 추정 토큰 |
 | rag_avg_similarity | FLOAT | RAG top-k 평균 유사도 (0~1) |
 | used_web_search | BOOLEAN | 웹 검색 보조 사용 여부 |
-| topic | VARCHAR(100) | LLM 추출 핵심 주제 태그 (Stage 1, 예: "Redis 연결 오류") |
+| topic | VARCHAR(100) | LLM 추출 핵심 주제 태그 (예: "Redis 연결 오류") |
+| product_key | VARCHAR(50) | LLM 분류 제품 키 (예: "iruda_backend") |
 | created_at | TIMESTAMP | 저장 시각 |
 
 UNIQUE: `(channel_id, message_ts)`
@@ -138,7 +153,30 @@ UNIQUE: `(channel_id, message_ts)`
 | user_id | VARCHAR(20) | 이모지 반응 사용자 ID |
 | reaction | VARCHAR(50) | thumbsup / thumbsdown 등 |
 | sentiment | VARCHAR(10) | 'positive' / 'negative' |
+| llm_failure_reason | VARCHAR(30) | LLM 분류 실패 원인 (wrong_source / hallucination / out_of_scope / format_issue) |
+| user_failure_reason | VARCHAR(30) | 사용자가 직접 선택한 실패 원인 |
 | created_at | TIMESTAMP | 저장 시각 |
+
+### bot_settings
+
+| 컬럼 | 타입 | 설명 |
+|------|------|------|
+| key | VARCHAR(100) PK | 설정 키 (예: "notification_admins") |
+| value | TEXT | JSON 직렬화된 설정 값 |
+| updated_at | TIMESTAMP | 마지막 변경 시각 |
+
+### product_categories
+
+| 컬럼 | 타입 | 설명 |
+|------|------|------|
+| id | INTEGER PK | |
+| product_key | VARCHAR(50) UNIQUE | 제품 키 (예: "iruda_backend") |
+| display_name | VARCHAR(100) | 사용자에게 보이는 제품명 |
+| owner_user_ids_json | TEXT | 담당자 Slack ID 목록 (JSON 배열) |
+| aliases_json | TEXT | 제품 별칭 목록 (JSON 배열, 분류기 힌트용) |
+| question_count | INTEGER | 누적 질문 수 (알림 임계값 판단용) |
+| notified_at | TIMESTAMP | 마지막 미담당 알림 전송 시각 |
+| created_at / updated_at | TIMESTAMP | 생성·수정 시각 |
 
 ### context_summary
 
@@ -263,9 +301,11 @@ SLACK_BOT/
     │   └── repository.py
     ├── batch/
     │   ├── collector.py
+    │   ├── categorizer.py         ← topic/is_question 보정 배치
     │   ├── scheduler.py
-    │   └── topic_normalizer.py    ← Stage 2 stub
+    │   └── topic_normalizer.py    ← canonical 주제명 통합 배치 (Stage 2)
     └── utils/
+        ├── conversation_grouper.py ← 5분 슬라이딩 윈도우 세션 청킹
         ├── file_processor.py      ← xlsx/docx/pdf/txt 추출
         ├── image_processor.py
         ├── pii_filter.py

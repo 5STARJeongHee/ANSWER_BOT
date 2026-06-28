@@ -1,6 +1,6 @@
 # 사내 Slack Q&A 챗봇 백엔드 구현 설명서
 
-> 작성일: 2026-06-16 / 최종 업데이트: 2026-06-22  
+> 작성일: 2026-06-16 / 최종 업데이트: 2026-06-29  
 > 구현 언어: Python 3.11+  
 > 작업 디렉토리: `D:\My\SLACK_BOT\slack_bot\`
 
@@ -30,23 +30,27 @@
    ├── [services/web_search.py]        → DuckDuckGo 보조 검색
    │
    ├── [batch/collector.py]            → 증분 백필 (미수집 과거 구간, 중단 후 재개)
-   ├── [batch/scheduler.py]            → APScheduler 주간 요약 등록
-   ├── [batch/topic_normalizer.py]     → 주제 태그 정규화 배치 (Stage 2, 미구현)
+   ├── [batch/categorizer.py]          → 미처리 메시지 topic/is_question 보정 배치
+   ├── [batch/scheduler.py]            → APScheduler 배치 등록 + 주기 동적 변경
+   ├── [batch/topic_normalizer.py]     → 자유 텍스트 topic canonical 통합 배치 (Stage 2)
    │
    ├── [db/models.py]                  → SQLAlchemy ORM + scoped_session
    ├── [db/repository.py]              → CRUD 함수 (모든 DB 접근 중앙화)
    │
    └── [utils/]
+         ├── conversation_grouper.py  → 채널 메시지 5분 슬라이딩 윈도우 세션 청킹
          ├── file_processor.py        → xlsx/docx/pdf/txt 텍스트 추출
          ├── image_processor.py       → Vision 모델 이미지 분석
          ├── pii_filter.py            → 이메일/전화/주민번호 마스킹
          └── token_counter.py         → 한국어 혼합 토큰 추정
 
 [PostgreSQL 15 + pgvector]
-   ├── conversation_message           (메시지 원문, 분석 메트릭, 주제 태그)
+   ├── conversation_message           (메시지 원문, 분석 메트릭, 주제 태그, product_key)
    ├── context_embedding              (벡터 768차원, ivfflat + trgm 인덱스)
-   ├── message_feedback               (이모지 반응 피드백)
-   └── context_summary                (주간 요약본)
+   ├── message_feedback               (이모지 반응 피드백, llm/user 실패 원인)
+   ├── context_summary                (주간 요약본)
+   ├── bot_settings                   (알림 관리자 등 봇 설정 key-value)
+   └── product_categories             (제품별 담당자 및 질문 카운트)
 ```
 
 ---
@@ -67,11 +71,13 @@
 | `services/summarizer.py` | 스레드 문맥 요약 / 주간 대화 요약 배치 | APScheduler 월요일 02시 실행 |
 | `services/web_search.py` | DuckDuckGo 보조 검색 | RAG 최고 유사도 0.90 미만일 때만 호출 |
 | `batch/collector.py` | 증분 백필 (미수집 과거 구간) | DB 최솟값 ts 기준, 1.3초 rate limit 대응 |
-| `batch/scheduler.py` | APScheduler 등록 | coalesce=True, max_instances=1 |
-| `batch/topic_normalizer.py` | 주제 태그 배치 정규화 (Stage 2 stub) | 미구현. 채널당 200건 이상 쌓인 후 활성화 예정 |
+| `batch/categorizer.py` | 미처리 메시지 topic/is_question 보정 배치 | --count/--all/--dry-run/--limit 옵션 지원 |
+| `batch/scheduler.py` | APScheduler 등록 + 주기 동적 변경 | `update_summary_schedule()` API 제공 |
+| `batch/topic_normalizer.py` | 자유 텍스트 topic canonical 통합 배치 (Stage 2) | LLM 한 번 호출로 distinct topic 그룹핑 |
 | `ui/message_blocks.py` | Block Kit 컴포넌트 빌더 | 답변·히스토리·대시보드·소개 블록 |
 | `ui/reaction_handler.py` | 이모지 반응 피드백 처리 | reaction_added 이벤트 → message_feedback 저장 |
 | `utils/file_processor.py` | 첨부파일 텍스트 추출 | xlsx/docx/pdf/txt 지원, 파일당 3000자 제한 |
+| `utils/conversation_grouper.py` | 채널 메시지 5분 슬라이딩 윈도우 세션 청킹 | 비스레드 메시지를 시간 기준으로 그룹핑 |
 | `utils/image_processor.py` | Vision 모델 이미지 분석 | base64 직렬화, 동시 처리 상한 제어 |
 | `utils/pii_filter.py` | PII 마스킹 | 이메일/전화/주민번호/카드/IP 패턴 |
 | `utils/token_counter.py` | 토큰 추정 | 한국어 1.5자/토큰, 영어 1.3단어/토큰 |
@@ -181,13 +187,14 @@ english_tokens = int(english_words * 1.3)  # 1.3 단어당 1토큰
 | content | TEXT | PII 마스킹된 메시지 본문 |
 | is_question | BOOLEAN | 분류기 판단 결과 |
 | is_fallback | BOOLEAN | Fallback 발동 여부 |
-| category | VARCHAR(20) | 분류기 결과 레이블 (QUESTION/REQUEST/NONE) |
+| category | VARCHAR(20) | 레거시 — is_question으로 대체됨 |
 | response_time_ms | INTEGER | 봇 응답 생성 소요 시간(ms) |
 | prompt_tokens | INTEGER | LLM 요청 토큰 수 (추정) |
 | completion_tokens | INTEGER | LLM 응답 토큰 수 (추정) |
 | rag_avg_similarity | FLOAT | RAG 검색 결과 평균 코사인 유사도 |
 | used_web_search | BOOLEAN | DuckDuckGo 보조 검색 사용 여부 |
-| topic | VARCHAR(100) | LLM 추출 핵심 주제 태그 (Stage 1 자유 텍스트) |
+| topic | VARCHAR(100) | LLM 추출 핵심 주제 태그 (자유 텍스트) |
+| product_key | VARCHAR(50) | LLM 분류 제품 키 (예: "iruda_backend") |
 | created_at | TIMESTAMP | 저장 시각 |
 
 UNIQUE: `(channel_id, message_ts)` — 중복 삽입 방지 2차 방어선
@@ -213,9 +220,33 @@ UNIQUE: `(channel_id, message_ts)` — 중복 삽입 방지 2차 방어선
 | message_id | BIGINT FK | conversation_message.id (CASCADE DELETE) |
 | user_id | VARCHAR(20) | 반응한 사용자 Slack ID |
 | reaction | VARCHAR(50) | 이모지 이름 (thumbsup / thumbsdown 등) |
+| sentiment | VARCHAR(10) | 'positive' / 'negative' |
+| llm_failure_reason | VARCHAR(30) | LLM 분류 실패 원인 (wrong_source / hallucination / out_of_scope / format_issue) |
+| user_failure_reason | VARCHAR(30) | 사용자가 직접 선택한 실패 원인 |
 | created_at | TIMESTAMP | 반응 저장 시각 |
 
 UNIQUE: `(message_id, user_id, reaction)` — 동일 반응 중복 저장 방지
+
+### bot_settings
+
+| 컬럼 | 타입 | 설명 |
+|------|------|------|
+| key | VARCHAR(100) PK | 설정 키 (예: "notification_admins") |
+| value | TEXT | JSON 직렬화된 설정 값 |
+| updated_at | TIMESTAMP | 마지막 변경 시각 |
+
+### product_categories
+
+| 컬럼 | 타입 | 설명 |
+|------|------|------|
+| id | INTEGER PK | |
+| product_key | VARCHAR(50) UNIQUE | 제품 키 (예: "iruda_backend") |
+| display_name | VARCHAR(100) | 사용자에게 보이는 제품명 |
+| owner_user_ids_json | TEXT | 담당자 Slack ID 목록 (JSON 배열) |
+| aliases_json | TEXT | 제품 별칭 목록 (JSON 배열, 분류기 힌트용) |
+| question_count | INTEGER | 누적 질문 수 (알림 임계값 판단용) |
+| notified_at | TIMESTAMP | 마지막 미담당 알림 전송 시각 |
+| created_at / updated_at | TIMESTAMP | 생성·수정 시각 |
 
 ### context_summary
 
@@ -268,7 +299,7 @@ Slack 이벤트 수신
 | `DATABASE_URL` | 필수 | - | postgresql://user:pass@host/db |
 | `ENABLE_VECTOR_SEARCH` | 선택 | true | false면 pgvector 불필요 |
 | `TARGET_CHANNEL_IDS` | 선택 | (없음) | 수집 채널 쉼표 구분 |
-| `FALLBACK_MENTION_USER_IDS` | 선택 | (없음) | 담당자 Slack User ID |
+| `FALLBACK_MENTION_USER_IDS` | 선택 | (없음) | 기본 에스컬레이션 담당자 ID (DB product_categories 미등록 시 폴백) |
 | `RUN_BACKFILL` | 선택 | false | true면 기동 시 백필 실행 |
 | `LOG_LEVEL` | 선택 | INFO | DEBUG/INFO/WARNING/ERROR |
 
@@ -343,7 +374,7 @@ python -m py_compile main.py
 | ivfflat 인덱스 | lists=100 | 데이터 10만 건 이상 시 lists 조정 또는 hnsw 전환 |
 | 분류기 캐시 | 인메모리 LRU 256개 | Redis 이관 시 다중 인스턴스 지원 |
 | 백필 재시도 | 단순 break | 재개 가능한 cursor 저장 로직 추가 |
-| 주제 태그 정규화 | Stage 1만 구현 (자유 텍스트) | Stage 2: 임베딩 클러스터링으로 canonical 주제명 정규화 (채널당 200건 이상 시 활성화) |
-| RAG + 주제 통합 | 미적용 | Stage 2 정규화 이후 canonical 주제를 메타데이터 필터 또는 boosting으로 활용 검토 |
-| 히스토리 그룹핑 | 단순 시간순 목록 | Stage 2 이후 canonical 주제별 그룹핑 및 동일 주제 과거 Q&A 요약 제시 |
+| 주제 태그 정규화 | Stage 2 구현 완료 (LLM canonical 통합) | 임베딩 클러스터링 기반 추가 정밀화 검토 가능 |
+| RAG + 주제 통합 | 미적용 | 정규화된 canonical 주제를 메타데이터 필터 또는 boosting으로 활용 검토 |
+| 히스토리 그룹핑 | 단순 시간순 목록 | canonical 주제별 그룹핑 및 동일 주제 과거 Q&A 요약 제시 |
 | 모니터링 | 로그만 | Prometheus metrics 또는 Slack 알림 추가 검토 |
