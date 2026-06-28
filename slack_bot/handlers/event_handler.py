@@ -1447,6 +1447,19 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
                     client=client, channel=channel_id, thread_ts=None
                 )
 
+                if _dm_product_key:
+                    _dm_cnt_session = session_factory()
+                    try:
+                        increment_product_question_count(_dm_cnt_session, _dm_product_key)
+                        _dm_cnt_session.commit()
+                    finally:
+                        _dm_cnt_session.close()
+                    threading.Thread(
+                        target=_notify_admin_unowned_products,
+                        args=(client, session_factory),
+                        daemon=True,
+                    ).start()
+
                 _process_question(
                     client=client,
                     channel_id=channel_id,
@@ -1565,5 +1578,10 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
                     _ch_cnt_session.commit()
                 finally:
                     _ch_cnt_session.close()
+                threading.Thread(
+                    target=_notify_admin_unowned_products,
+                    args=(client, session_factory),
+                    daemon=True,
+                ).start()
 
         threading.Thread(target=worker, daemon=True).start()

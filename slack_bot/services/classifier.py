@@ -209,5 +209,11 @@ def extract_topic_and_product(
     if not isinstance(product, str) or product.lower() in ("null", "none", ""):
         product = None
 
+    # LLM이 알려진 제품 키 목록에 없는 값을 반환하면 무시
+    valid_keys = {p["key"] for p in products}
+    if product and product not in valid_keys:
+        logger.warning(f"LLM이 알 수 없는 제품 키 반환 (무시): {product!r}")
+        product = None
+
     logger.debug(f"주제+제품 추출: topic={topic!r} product={product!r} | 메시지={message[:50]!r}")
     return topic, product
