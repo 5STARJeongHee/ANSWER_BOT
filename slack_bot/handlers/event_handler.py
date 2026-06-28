@@ -27,6 +27,9 @@ from db.repository import (
     increment_product_question_count,
     get_unowned_products_above_threshold,
     mark_product_notified,
+    get_notification_admins,
+    add_notification_admin,
+    remove_notification_admin,
 )
 from services.classifier import classify_message, extract_topic, extract_topic_and_product, MessageCategory
 from services.context_retriever import retrieve_context, format_context_for_prompt, embed_text
@@ -283,22 +286,111 @@ def _handle_owner_command(
         session.close()
 
 
-def _notify_admin_unowned_products(client, session_factory) -> None:
-    """담당자 미지정 제품 중 질문이 임계값 이상이면 관리자에게 DM을 보낸다."""
-    import json as _json
-    if not config.BACKFILL_ADMIN_USER_IDS:
-        return
+_NOTIF_ADMIN_LIST_KEYWORDS = ("알림관리자 목록", "알림 관리자 목록", "알림관리자목록", "notifyadmin list")
+_NOTIF_ADMIN_ADD_PREFIX = ("알림관리자 추가", "알림 관리자 추가", "알림관리자추가", "notifyadmin add")
+_NOTIF_ADMIN_DEL_PREFIX = ("알림관리자 삭제", "알림 관리자 삭제", "알림관리자삭제", "notifyadmin delete")
+
+
+def _handle_notification_admin_command(
+    client,
+    channel_id: str,
+    thread_ts: Optional[str],
+    question: str,
+    session_factory,
+) -> bool:
+    """알림 관리자 관리 명령을 처리한다. 처리 시 True, 아니면 False 반환."""
+    stripped = question.strip()
+    lower_nospace = stripped.lower().replace(" ", "")
 
     session = session_factory()
     try:
+        # 목록 조회
+        for kw in _NOTIF_ADMIN_LIST_KEYWORDS:
+            if lower_nospace.startswith(kw.replace(" ", "")):
+                admins = get_notification_admins(session)
+                if not admins:
+                    post_message(client=client, channel=channel_id, thread_ts=thread_ts,
+                                 text="등록된 알림 관리자가 없습니다. `알림관리자 추가 @유저명`으로 추가하세요.")
+                else:
+                    mention_str = " ".join(f"<@{u}>" for u in admins)
+                    post_message(client=client, channel=channel_id, thread_ts=thread_ts,
+                                 text=f"*알림 관리자 목록*\n{mention_str}")
+                return True
+
+        # 추가
+        for kw in _NOTIF_ADMIN_ADD_PREFIX:
+            if lower_nospace.startswith(kw.replace(" ", "")):
+                user_ids = _MENTION_RE.findall(stripped)
+                if not user_ids:
+                    post_message(client=client, channel=channel_id, thread_ts=thread_ts,
+                                 text="추가할 관리자를 @멘션으로 입력하세요. 예: `알림관리자 추가 @유저명`")
+                    return True
+                added, already = [], []
+                for uid in user_ids:
+                    if add_notification_admin(session, uid):
+                        added.append(uid)
+                    else:
+                        already.append(uid)
+                session.commit()
+                parts = []
+                if added:
+                    parts.append(" ".join(f"<@{u}>" for u in added) + " 추가됨")
+                if already:
+                    parts.append(" ".join(f"<@{u}>" for u in already) + " 이미 등록됨")
+                post_message(client=client, channel=channel_id, thread_ts=thread_ts,
+                             text="알림 관리자 " + ", ".join(parts) + ".")
+                return True
+
+        # 삭제
+        for kw in _NOTIF_ADMIN_DEL_PREFIX:
+            if lower_nospace.startswith(kw.replace(" ", "")):
+                user_ids = _MENTION_RE.findall(stripped)
+                if not user_ids:
+                    post_message(client=client, channel=channel_id, thread_ts=thread_ts,
+                                 text="삭제할 관리자를 @멘션으로 입력하세요. 예: `알림관리자 삭제 @유저명`")
+                    return True
+                removed, not_found = [], []
+                for uid in user_ids:
+                    if remove_notification_admin(session, uid):
+                        removed.append(uid)
+                    else:
+                        not_found.append(uid)
+                session.commit()
+                parts = []
+                if removed:
+                    parts.append(" ".join(f"<@{u}>" for u in removed) + " 삭제됨")
+                if not_found:
+                    parts.append(" ".join(f"<@{u}>" for u in not_found) + " 미등록 상태")
+                post_message(client=client, channel=channel_id, thread_ts=thread_ts,
+                             text="알림 관리자 " + ", ".join(parts) + ".")
+                return True
+
+        return False
+    except Exception as e:
+        logger.error(f"알림 관리자 명령 처리 오류: {e}", exc_info=True)
+        post_message(client=client, channel=channel_id, thread_ts=thread_ts,
+                     text=f"알림 관리자 명령 처리 중 오류가 발생했습니다: {e}")
+        return True
+    finally:
+        session.close()
+
+
+def _notify_admin_unowned_products(client, session_factory) -> None:
+    """담당자 미지정 제품 중 질문이 임계값 이상이면 알림 관리자에게 DM을 보낸다."""
+    import datetime
+    session = session_factory()
+    try:
+        admin_ids = get_notification_admins(session)
+        if not admin_ids:
+            return
+
         candidates = get_unowned_products_above_threshold(session, threshold=5)
-        notifiable = []
-        import datetime
-        for c in candidates:
+        notifiable = [
+            c for c in candidates
             if c.notified_at is None or (
                 datetime.datetime.utcnow() - c.notified_at
-            ).total_seconds() > 86400:
-                notifiable.append(c)
+            ).total_seconds() > 86400
+        ]
 
         if not notifiable:
             return
@@ -309,7 +401,7 @@ def _notify_admin_unowned_products(client, session_factory) -> None:
         lines.append("\n`@QNA BOT 담당자 설정 [제품키] @담당자1 @담당자2` 로 지정하세요.")
         msg = "\n".join(lines)
 
-        for admin_id in config.BACKFILL_ADMIN_USER_IDS:
+        for admin_id in admin_ids:
             try:
                 resp = client.conversations_open(users=[admin_id])
                 dm_channel = resp["channel"]["id"]
@@ -1195,6 +1287,12 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
                     dash_session.close()
 
             threading.Thread(target=dashboard_worker, daemon=True).start()
+            return
+        # ────────────────────────────────────────────────────────────────────
+
+        # ── 알림 관리자 명령 감지 ────────────────────────────────────────────
+        if _handle_notification_admin_command(client, channel_id, thread_ts, question, session_factory):
+            logger.info(f"알림 관리자 명령 처리 완료: user={user_id}")
             return
         # ────────────────────────────────────────────────────────────────────
 

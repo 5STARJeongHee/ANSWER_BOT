@@ -1233,6 +1233,43 @@ def save_bot_setting(session: Session, key: str, value: str) -> None:
     session.flush()
 
 
+_NOTIFICATION_ADMINS_KEY = "notification_admins"
+
+
+def get_notification_admins(session: Session) -> list[str]:
+    """알림 관리자 목록을 반환한다."""
+    import json as _json
+    raw = get_bot_setting(session, _NOTIFICATION_ADMINS_KEY)
+    if not raw:
+        return []
+    try:
+        return _json.loads(raw)
+    except Exception:
+        return []
+
+
+def add_notification_admin(session: Session, user_id: str) -> bool:
+    """알림 관리자를 추가한다. 이미 있으면 False 반환."""
+    import json as _json
+    admins = get_notification_admins(session)
+    if user_id in admins:
+        return False
+    admins.append(user_id)
+    save_bot_setting(session, _NOTIFICATION_ADMINS_KEY, _json.dumps(admins))
+    return True
+
+
+def remove_notification_admin(session: Session, user_id: str) -> bool:
+    """알림 관리자를 제거한다. 없으면 False 반환."""
+    import json as _json
+    admins = get_notification_admins(session)
+    if user_id not in admins:
+        return False
+    admins.remove(user_id)
+    save_bot_setting(session, _NOTIFICATION_ADMINS_KEY, _json.dumps(admins))
+    return True
+
+
 # ---------------------------------------------------------------------------
 # ProductCategory CRUD
 # ---------------------------------------------------------------------------
