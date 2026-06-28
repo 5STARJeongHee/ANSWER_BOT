@@ -1,87 +1,146 @@
--- Slack 챗봇 초기 스키마 마이그레이션 SQL
+-- Slack 챗봇 초기 스키마 (Supabase 신규 설치용)
+-- 기준: models.py 전체 반영 (2026-06-29)
 --
 -- [Supabase 실행 방법]
 -- 1. Supabase 대시보드 → SQL Editor → New query
 -- 2. 이 파일 내용을 전체 붙여넣기 후 Run (F5)
--- 3. pgvector는 Supabase에 기본 내장 — 아래 CREATE EXTENSION 구문은 멱등적으로 안전
 --
 -- [로컬 PostgreSQL 실행 방법]
 -- psql -U postgres -d slackbot_db -f 001_initial_schema.sql
 
--- pgvector 확장 활성화
--- Supabase: 이미 내장 (IF NOT EXISTS로 안전하게 실행됨)
--- 로컬: pgvector 별도 설치 필요 (docker: ankane/pgvector)
+-- ────────────────────────────────────────────────────────────────────────────
+-- 확장
+-- ────────────────────────────────────────────────────────────────────────────
+-- pgvector: Supabase에 기본 내장 / 로컬은 별도 설치 필요 (ankane/pgvector)
 CREATE EXTENSION IF NOT EXISTS vector;
+-- pg_trgm: 한글·에러코드 hybrid 검색용
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
 
--- ---------------------------------------------------------------------------
--- conversation_message: Slack 메시지 원문 저장 테이블
--- ---------------------------------------------------------------------------
+-- ────────────────────────────────────────────────────────────────────────────
+-- conversation_message
+-- ────────────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS conversation_message (
-    id          BIGSERIAL PRIMARY KEY,
-    event_id    VARCHAR(100) UNIQUE,
-    channel_id  VARCHAR(20) NOT NULL,
-    thread_ts   VARCHAR(30),
-    message_ts  VARCHAR(30) NOT NULL,
-    user_id     VARCHAR(20),
-    role        VARCHAR(10) NOT NULL,      -- 'user' | 'bot'
-    content     TEXT NOT NULL,
-    content_raw TEXT,                      -- PII 마스킹 전 원문 (옵션)
-    is_question BOOLEAN,
-    is_fallback BOOLEAN DEFAULT FALSE,
-    created_at  TIMESTAMP NOT NULL DEFAULT NOW(),
+    id                  BIGSERIAL    PRIMARY KEY,
+    event_id            VARCHAR(100) UNIQUE,
+    channel_id          VARCHAR(20)  NOT NULL,
+    thread_ts           VARCHAR(30),
+    message_ts          VARCHAR(30)  NOT NULL,
+    user_id             VARCHAR(20),
+    role                VARCHAR(10)  NOT NULL,       -- 'user' | 'bot'
+    content             TEXT         NOT NULL,
+    content_raw         TEXT,                        -- PII 마스킹 전 원문 (옵션)
+    is_question         BOOLEAN,
+    is_fallback         BOOLEAN      DEFAULT FALSE,
+    category            VARCHAR(20),                 -- 레거시 (is_question으로 대체됨)
+    response_time_ms    INTEGER,                     -- 봇 응답 생성 소요 시간 (ms)
+    prompt_tokens       INTEGER,                     -- LLM 입력 추정 토큰
+    completion_tokens   INTEGER,                     -- LLM 출력 추정 토큰
+    rag_avg_similarity  FLOAT,                       -- RAG top-k 평균 유사도 (0~1)
+    used_web_search     BOOLEAN      DEFAULT FALSE,  -- 웹 검색 보조 사용 여부
+    topic               VARCHAR(100),                -- LLM 추출 핵심 주제 태그 (예: "Redis 연결 오류")
+    product_key         VARCHAR(50),                 -- LLM 분류 제품 키 (예: "iruda_backend")
+    created_at          TIMESTAMP    NOT NULL DEFAULT NOW(),
+
     CONSTRAINT uq_channel_message_ts UNIQUE (channel_id, message_ts)
 );
 
-CREATE INDEX IF NOT EXISTS ix_conversation_message_channel_id
-    ON conversation_message (channel_id);
+CREATE INDEX IF NOT EXISTS ix_conv_msg_event_id        ON conversation_message (event_id);
+CREATE INDEX IF NOT EXISTS ix_conv_msg_channel_id      ON conversation_message (channel_id);
+CREATE INDEX IF NOT EXISTS ix_conv_msg_thread_ts       ON conversation_message (thread_ts);
+CREATE INDEX IF NOT EXISTS ix_conv_msg_message_ts      ON conversation_message (message_ts);
+CREATE INDEX IF NOT EXISTS ix_conv_msg_created_at_role ON conversation_message (created_at, role);
+CREATE INDEX IF NOT EXISTS ix_conv_msg_category
+    ON conversation_message (category)
+    WHERE category IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_conv_msg_rag_similarity
+    ON conversation_message (rag_avg_similarity)
+    WHERE rag_avg_similarity IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_conv_msg_topic
+    ON conversation_message (topic)
+    WHERE topic IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_conv_msg_product_key
+    ON conversation_message (product_key)
+    WHERE product_key IS NOT NULL;
 
-CREATE INDEX IF NOT EXISTS ix_conversation_message_thread_ts
-    ON conversation_message (thread_ts)
-    WHERE thread_ts IS NOT NULL;
-
-CREATE INDEX IF NOT EXISTS ix_conversation_message_message_ts
-    ON conversation_message (message_ts);
-
-CREATE INDEX IF NOT EXISTS ix_conversation_message_event_id
-    ON conversation_message (event_id)
-    WHERE event_id IS NOT NULL;
-
--- ---------------------------------------------------------------------------
--- context_embedding: 메시지 청크 벡터 임베딩 테이블
--- 임베딩 차원: 768 (paraphrase-multilingual-mpnet-base-v2)
--- ---------------------------------------------------------------------------
+-- ────────────────────────────────────────────────────────────────────────────
+-- context_embedding
+-- ────────────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS context_embedding (
-    id                 BIGSERIAL PRIMARY KEY,
-    source_message_id  BIGINT NOT NULL REFERENCES conversation_message(id) ON DELETE CASCADE,
-    chunk_text         TEXT NOT NULL,
-    embedding          vector(768),        -- pgvector: 코사인 유사도 검색용
-    embedding_json     TEXT,               -- fallback: JSON 직렬화 벡터
-    created_at         TIMESTAMP NOT NULL DEFAULT NOW()
+    id                BIGSERIAL PRIMARY KEY,
+    source_message_id BIGINT    NOT NULL REFERENCES conversation_message(id) ON DELETE CASCADE,
+    chunk_text        TEXT      NOT NULL,
+    chunk_type        VARCHAR(20),           -- 'message' | 'thread' | 'conversation' | 'session' | 'qa_feedback'
+    embedding         vector(768),           -- pgvector 컬럼 (EMBEDDING_DIM=768 기준)
+    embedding_json    TEXT,                  -- pgvector 미사용 환경 fallback
+    created_at        TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS ix_context_embedding_source_message_id
-    ON context_embedding (source_message_id);
-
--- ivfflat 인덱스: 코사인 유사도 검색 성능 최적화
--- 주의: 데이터가 최소 1000건 이상일 때 효과적
-CREATE INDEX IF NOT EXISTS ix_context_embedding_vector
+CREATE INDEX IF NOT EXISTS ix_ctx_emb_source_message_id ON context_embedding (source_message_id);
+-- ivfflat: 코사인 유사도 검색 최적화 / 데이터 1,000건 이상일 때 효과적
+CREATE INDEX IF NOT EXISTS ix_ctx_emb_vector
     ON context_embedding USING ivfflat (embedding vector_cosine_ops)
     WITH (lists = 100);
+-- trigram: 한글·에러코드 키워드 검색용 (hybrid search)
+CREATE INDEX IF NOT EXISTS ix_ctx_emb_trgm
+    ON context_embedding USING gin (chunk_text gin_trgm_ops);
 
--- ---------------------------------------------------------------------------
--- context_summary: 채널별 주기적 대화 요약본 테이블 (V2)
--- ---------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS context_summary (
-    id            BIGSERIAL PRIMARY KEY,
-    channel_id    VARCHAR(20) NOT NULL,
-    period_start  DATE NOT NULL,
-    period_end    DATE NOT NULL,
-    summary_text  TEXT NOT NULL,
-    created_at    TIMESTAMP NOT NULL DEFAULT NOW()
+-- ────────────────────────────────────────────────────────────────────────────
+-- message_feedback
+-- ────────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS message_feedback (
+    id                  BIGSERIAL    PRIMARY KEY,
+    channel_id          VARCHAR(20)  NOT NULL,
+    message_ts          VARCHAR(30)  NOT NULL,       -- 봇 답변 ts
+    user_id             VARCHAR(20)  NOT NULL,
+    reaction            VARCHAR(50)  NOT NULL,       -- thumbsup | thumbsdown 등
+    sentiment           VARCHAR(10)  NOT NULL,       -- 'positive' | 'negative'
+    llm_failure_reason  VARCHAR(30),                 -- wrong_source | hallucination | out_of_scope | format_issue
+    user_failure_reason VARCHAR(30),                 -- 사용자가 직접 선택한 실패 원인
+    created_at          TIMESTAMP    NOT NULL DEFAULT NOW(),
+
+    CONSTRAINT uq_feedback_ts_user_reaction UNIQUE (message_ts, user_id, reaction)
 );
 
-CREATE INDEX IF NOT EXISTS ix_context_summary_channel_id
-    ON context_summary (channel_id);
+CREATE INDEX IF NOT EXISTS ix_msg_feedback_channel_id ON message_feedback (channel_id);
+CREATE INDEX IF NOT EXISTS ix_msg_feedback_message_ts ON message_feedback (message_ts);
 
-CREATE INDEX IF NOT EXISTS ix_context_summary_period_end
-    ON context_summary (period_end DESC);
+-- ────────────────────────────────────────────────────────────────────────────
+-- context_summary
+-- ────────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS context_summary (
+    id           BIGSERIAL   PRIMARY KEY,
+    channel_id   VARCHAR(20) NOT NULL,
+    period_start DATE        NOT NULL,
+    period_end   DATE        NOT NULL,
+    summary_text TEXT        NOT NULL,
+    created_at   TIMESTAMP   NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS ix_ctx_summary_channel_id ON context_summary (channel_id);
+CREATE INDEX IF NOT EXISTS ix_ctx_summary_period_end  ON context_summary (period_end DESC);
+
+-- ────────────────────────────────────────────────────────────────────────────
+-- bot_settings
+-- ────────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS bot_settings (
+    key        VARCHAR(100) PRIMARY KEY,
+    value      TEXT         NOT NULL,
+    updated_at TIMESTAMP    NOT NULL DEFAULT NOW()
+);
+
+-- ────────────────────────────────────────────────────────────────────────────
+-- product_categories
+-- ────────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS product_categories (
+    id                   SERIAL       PRIMARY KEY,
+    product_key          VARCHAR(50)  NOT NULL UNIQUE,
+    display_name         VARCHAR(100) NOT NULL,
+    owner_user_ids_json  TEXT         NOT NULL DEFAULT '[]',  -- JSON 배열
+    aliases_json         TEXT         NOT NULL DEFAULT '[]',  -- JSON 배열
+    question_count       INTEGER      NOT NULL DEFAULT 0,
+    notified_at          TIMESTAMP,
+    created_at           TIMESTAMP    NOT NULL DEFAULT NOW(),
+    updated_at           TIMESTAMP    NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS ix_product_categories_product_key ON product_categories (product_key);
