@@ -10,7 +10,7 @@ from typing import Callable, Optional
 from slack_sdk import WebClient
 
 import config
-from db.repository import upsert_message, save_embedding, get_oldest_message_ts, save_mention_chain_embedding
+from db.repository import upsert_message, save_embedding, get_oldest_message_ts
 from services.context_retriever import embed_text
 from utils.image_processor import analyze_slack_files
 from utils.pii_filter import apply_pii_filter
@@ -222,7 +222,6 @@ def backfill_channel(
                 # thread_ts == ts인 부모도 포함해야 DB에 저장된 봇 답변과 함께 청크를 생성할 수 있다.
                 if config.ENABLE_THREAD_CHUNKING:
                     from db.repository import save_thread_chunk_embedding
-                    from utils.conversation_grouper import group_messages_by_conversation
 
                     thread_tss = {
                         msg.get("thread_ts")
@@ -239,35 +238,6 @@ def backfill_channel(
                             )
                         except Exception as exc:
                             logger.warning(f"Thread 청크 저장 실패 (ts={ts}): {exc}")
-
-                    # 비스레드 @mention 대화 체인 감지 및 conversation 청크 저장
-                    non_threaded_msgs = [m for m in valid_msgs if not m.get("thread_ts")]
-                    if non_threaded_msgs:
-                        normalized = [
-                            {
-                                "user_id": (m.get("user") or m.get("bot_id") or "").upper(),
-                                "role": "bot" if m.get("bot_id") else "user",
-                                "content": m.get("text", ""),
-                                "thread_ts": None,
-                                "created_at": _slack_ts_to_datetime(m.get("ts", "0")),
-                                "_ts": m.get("ts", ""),
-                            }
-                            for m in non_threaded_msgs
-                        ]
-                        chains = group_messages_by_conversation(normalized)
-                        for chain in chains:
-                            if len(chain) < 2:
-                                continue
-                            ts_list = [c["_ts"] for c in chain if c.get("_ts")]
-                            try:
-                                save_mention_chain_embedding(
-                                    session=session,
-                                    channel_id=channel_id,
-                                    message_ts_list=ts_list,
-                                    embed_fn=embed_text,
-                                )
-                            except Exception as exc:
-                                logger.warning(f"Conversation 청크 저장 실패: {exc}")
 
                 session.commit()
                 has_next = bool(response.get("response_metadata", {}).get("next_cursor"))
@@ -317,11 +287,76 @@ def backfill_channel(
             # 연속 오류 방지를 위해 루프 종료
             break
 
+    # Session 윈도우 청크: 전체 수집 완료 후 비스레드 메시지를 시간순으로 한 번에 처리
+    # (per-message newest-first 루프로 처리하면 동일 윈도우를 덮어써 청크가 깨지므로 후처리 패스)
+    if config.ENABLE_SESSION_CHUNKING and collected_count > 0:
+        _run_session_window_pass(
+            session_factory=session_factory,
+            channel_id=channel_id,
+            oldest_ts=oldest_ts,
+        )
+
     logger.info(
         f"[백필 완료] 채널={channel_id} | 페이지 {page}개 | "
         f"총 가져옴 {fetched_total}건 | 신규 저장 {collected_count}건 | 중복 스킵 {dup_count}건"
     )
     return collected_count
+
+
+def _run_session_window_pass(
+    session_factory,
+    channel_id: str,
+    oldest_ts: str,
+) -> None:
+    """수집 완료 후 비스레드 user 메시지를 시간순으로 조회해 session 윈도우 청크를 생성한다.
+
+    conversations.history는 newest-first로 반환되므로 per-message 루프에서 처리하면
+    같은 윈도우를 작은 범위로 덮어쓰는 문제가 발생한다. 이를 방지하기 위해 전체 수집 후
+    DB에서 oldest-first로 꺼내 순서대로 처리한다.
+    """
+    from db.models import ConversationMessage
+    from db.repository import save_session_window_embedding
+
+    session = session_factory()
+    try:
+        rows = (
+            session.query(ConversationMessage.message_ts)
+            .filter(
+                ConversationMessage.channel_id == channel_id,
+                ConversationMessage.thread_ts == None,  # noqa: E711
+                ConversationMessage.role == "user",
+                ConversationMessage.message_ts >= oldest_ts,
+            )
+            .order_by(ConversationMessage.message_ts.asc())
+            .all()
+        )
+
+        if not rows:
+            return
+
+        logger.info(f"Session 윈도우 청크 생성 시작 (channel={channel_id}, 대상={len(rows)}건)")
+        chunk_count = 0
+        for (ts,) in rows:
+            try:
+                result = save_session_window_embedding(
+                    session=session,
+                    channel_id=channel_id,
+                    current_message_ts=ts,
+                    embed_fn=embed_text,
+                    window_minutes=config.SESSION_WINDOW_MINUTES,
+                )
+                if result:
+                    chunk_count += 1
+            except Exception as exc:
+                logger.warning(f"Session 윈도우 청크 실패 (ts={ts}): {exc}")
+
+        session.commit()
+        logger.info(f"Session 윈도우 청크 완료 (channel={channel_id}, 생성/갱신={chunk_count}건)")
+    except Exception as exc:
+        session.rollback()
+        logger.error(f"Session 윈도우 패스 오류 (channel={channel_id}): {exc}", exc_info=True)
+    finally:
+        session.close()
 
 
 def run_all_channels_backfill(

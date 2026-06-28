@@ -1,4 +1,4 @@
-# topic/is_question이 NULL인 과거 메시지를 일괄 보정하는 배치 모듈
+# topic/is_question/product_key가 NULL인 과거 메시지를 일괄 보정하는 배치 모듈
 from __future__ import annotations
 import argparse
 import logging
@@ -7,7 +7,8 @@ import time
 from sqlalchemy.orm import Session
 
 from db.models import ConversationMessage, get_session_factory
-from services.classifier import classify_message, extract_topic
+from db.repository import get_products_as_llm_hints, increment_product_question_count
+from services.classifier import classify_message, extract_topic, extract_topic_and_product
 
 logger = logging.getLogger(__name__)
 
@@ -22,13 +23,17 @@ _PROGRESS_LOG_INTERVAL = 10
 
 
 def _fetch_unprocessed(session: Session, limit: int) -> list[ConversationMessage]:
-    """topic 또는 is_question이 NULL인 user 메시지를 조회한다."""
+    """topic, is_question, 또는 product_key(질문인 경우)가 NULL인 user 메시지를 조회한다."""
     return (
         session.query(ConversationMessage)
         .filter(
             ConversationMessage.role == "user",
             (ConversationMessage.topic == None)  # noqa: E711
-            | (ConversationMessage.is_question == None),
+            | (ConversationMessage.is_question == None)
+            | (
+                (ConversationMessage.is_question == True)  # noqa: E712
+                & (ConversationMessage.product_key == None)  # noqa: E711
+            ),
         )
         .order_by(ConversationMessage.id)
         .limit(limit)
@@ -42,12 +47,19 @@ def run_categorize_batch(
     dry_run: bool = False,
 ) -> dict:
     """
-    topic 또는 is_question이 NULL인 user 메시지를 보정한다.
+    topic, is_question, product_key가 NULL인 user 메시지를 보정한다.
     - is_question: LLM 분류기로 actionable 여부 판단
-    - topic: LLM으로 핵심 주제 태그 추출
+    - topic + product_key: 질문 메시지는 extract_topic_and_product으로 한 번에 추출
+    - topic 전용: 비질문 메시지는 extract_topic으로 topic만 추출
     처리 결과 통계 dict를 반환한다.
     """
-    stats = {"total": 0, "is_question_filled": 0, "topic_filled": 0, "errors": 0}
+    stats = {
+        "total": 0,
+        "is_question_filled": 0,
+        "topic_filled": 0,
+        "product_key_filled": 0,
+        "errors": 0,
+    }
 
     session = session_factory()
     try:
@@ -58,7 +70,11 @@ def run_categorize_batch(
             logger.info("보정할 메시지 없음 — 모두 처리된 상태.")
             return stats
 
-        logger.info(f"미처리 메시지 {len(msgs)}건 보정 시작 (dry_run={dry_run})")
+        # product_key 분류에 사용할 제품 목록을 루프 전에 한 번만 조회한다.
+        products = get_products_as_llm_hints(session)
+        logger.info(
+            f"미처리 메시지 {len(msgs)}건 보정 시작 (dry_run={dry_run}, 제품 목록 {len(products)}건)"
+        )
 
         for i, msg in enumerate(msgs, 1):
             try:
@@ -76,14 +92,33 @@ def run_categorize_batch(
                     did_llm_call = True
                     time.sleep(_LLM_CALL_INTERVAL)
 
-                if msg.topic is None and len(msg.content.strip()) >= 10:
-                    topic = extract_topic(msg.content)
-                    if topic and not dry_run:
-                        msg.topic = topic
-                    stats["topic_filled"] += 1
-                    logger.debug(f"topic: id={msg.id} → {topic!r}")
+                needs_topic = msg.topic is None and len(msg.content.strip()) >= 10
+                needs_product = msg.is_question is True and msg.product_key is None
+
+                if needs_topic or needs_product:
                     if did_llm_call:
                         time.sleep(_LLM_CALL_INTERVAL)
+
+                    if msg.is_question:
+                        # 질문 메시지: topic + product_key를 LLM 1회 호출로 추출
+                        topic, product_key = extract_topic_and_product(msg.content, products)
+                        if not dry_run:
+                            if needs_topic and topic:
+                                msg.topic = topic
+                                stats["topic_filled"] += 1
+                            if needs_product and product_key:
+                                msg.product_key = product_key
+                                stats["product_key_filled"] += 1
+                                # 제품별 질문 카운터 동기화 (백필 데이터 정합성)
+                                increment_product_question_count(session, product_key)
+                        logger.debug(f"topic+product: id={msg.id} → topic={topic!r}, product={product_key!r}")
+                    elif needs_topic:
+                        # 비질문 메시지: topic만 추출
+                        topic = extract_topic(msg.content)
+                        if topic and not dry_run:
+                            msg.topic = topic
+                            stats["topic_filled"] += 1
+                        logger.debug(f"topic: id={msg.id} → {topic!r}")
 
             except Exception as exc:
                 stats["errors"] += 1
@@ -94,6 +129,7 @@ def run_categorize_batch(
                     f"[보정 진행] {i}/{len(msgs)}건 | "
                     f"is_question {stats['is_question_filled']}건 | "
                     f"topic {stats['topic_filled']}건 | "
+                    f"product_key {stats['product_key_filled']}건 | "
                     f"오류 {stats['errors']}건"
                 )
 
@@ -111,6 +147,7 @@ def run_categorize_batch(
         f"[보정 배치 완료] 전체 {stats['total']}건 | "
         f"is_question {stats['is_question_filled']}건 | "
         f"topic {stats['topic_filled']}건 | "
+        f"product_key {stats['product_key_filled']}건 | "
         f"오류 {stats['errors']}건"
         + (" (dry_run — DB 미반영)" if dry_run else "")
     )
@@ -118,7 +155,7 @@ def run_categorize_batch(
 
 
 def count_unprocessed(session_factory) -> int:
-    """미처리(topic 또는 is_question이 NULL) user 메시지 수를 반환한다."""
+    """미처리(topic·is_question·product_key 중 하나라도 NULL) user 메시지 수를 반환한다."""
     session = session_factory()
     try:
         return (
@@ -126,7 +163,11 @@ def count_unprocessed(session_factory) -> int:
             .filter(
                 ConversationMessage.role == "user",
                 (ConversationMessage.topic == None)  # noqa: E711
-                | (ConversationMessage.is_question == None),
+                | (ConversationMessage.is_question == None)
+                | (
+                    (ConversationMessage.is_question == True)  # noqa: E712
+                    & (ConversationMessage.product_key == None)  # noqa: E711
+                ),
             )
             .count()
         )
@@ -204,7 +245,8 @@ if __name__ == "__main__":
                 logger.error("모든 메시지 처리 실패 — 반복 중단.")
                 break
         print(
-            f"전체 처리 완료: {total_processed}건 | 배치 {batch_num}회 | 오류 {total_errors}건",
+            f"전체 처리 완료: {total_processed}건 | 배치 {batch_num}회 | 오류 {total_errors}건 | "
+            f"product_key 집계는 로그 참조",
             flush=True,
         )
 
@@ -218,5 +260,6 @@ if __name__ == "__main__":
             f"처리 완료 — 전체 {stats['total']}건 | "
             f"is_question {stats['is_question_filled']}건 | "
             f"topic {stats['topic_filled']}건 | "
+            f"product_key {stats['product_key_filled']}건 | "
             f"오류 {stats['errors']}건"
         )
