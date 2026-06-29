@@ -118,15 +118,31 @@ class TestRetrieveContext:
         assert call_kwargs["channel_id"] == "C_CHANNEL_123"
 
     def test_passes_top_k_to_search(self):
+        """reranking 비활성 시 top_k가 그대로 search에 전달된다."""
         mock_session = self._make_session()
 
         with patch("services.context_retriever._generate_rag_query", return_value="쿼리"), \
              patch.object(retriever_module, "embed_text", return_value=[0.1]), \
-             patch("services.context_retriever.search_similar_embeddings", return_value=[]) as mock_search:
+             patch("services.context_retriever.search_similar_embeddings", return_value=[]) as mock_search, \
+             patch("services.context_retriever.config.ENABLE_RERANKING", False):
             retrieve_context(mock_session, "질문", top_k=3)
 
         call_kwargs = mock_search.call_args[1]
         assert call_kwargs["top_k"] == 3
+
+    def test_passes_pool_k_to_search_when_reranking(self):
+        """reranking 활성 시 pool_k(RAG_RERANK_POOL_K)가 search에 전달된다."""
+        mock_session = self._make_session()
+
+        with patch("services.context_retriever._generate_rag_query", return_value="쿼리"), \
+             patch.object(retriever_module, "embed_text", return_value=[0.1]), \
+             patch("services.context_retriever.search_similar_embeddings", return_value=[]) as mock_search, \
+             patch("services.context_retriever.config.ENABLE_RERANKING", True), \
+             patch("services.context_retriever.config.RAG_RERANK_POOL_K", 15):
+            retrieve_context(mock_session, "질문", top_k=3)
+
+        call_kwargs = mock_search.call_args[1]
+        assert call_kwargs["top_k"] == 15
 
     def test_embed_text_failure_passes_empty_list_to_search(self):
         """임베딩 실패 시 query_embedding=[] 로 검색을 진행한다."""
