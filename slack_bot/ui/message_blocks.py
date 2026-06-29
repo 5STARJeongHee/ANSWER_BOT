@@ -64,6 +64,7 @@ def build_answer_blocks(
     context_count: int = 0,
     user_mention: Optional[str] = None,
     show_thread_tip: bool = False,
+    related_qa: Optional[list[dict]] = None,
 ) -> dict:
     """
     일반 QA 답변 Block Kit 페이로드를 반환한다.
@@ -143,6 +144,31 @@ def build_answer_blocks(
                         ),
                     }
                 ],
+            }
+        )
+
+    # 6. 같은 주제의 과거 Q&A 블록 추가
+    if related_qa:
+        blocks.append({"type": "divider"})
+        blocks.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "🏷️ *같은 주제의 과거 Q&A*",
+                },
+            }
+        )
+        qa_lines = []
+        for qa in related_qa:
+            qa_lines.append(f"• *Q:* {qa['q_preview']}\n  *A:* {qa['a_preview']}")
+        blocks.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "\n\n".join(qa_lines),
+                },
             }
         )
 

@@ -1,4 +1,4 @@
-﻿# Hybrid Search + Reranking 기반 Advanced RAG 컨텍스트 검색 서비스
+# Hybrid Search + Reranking 기반 Advanced RAG 컨텍스트 검색 서비스
 from __future__ import annotations
 import logging
 from typing import Optional
@@ -109,6 +109,7 @@ def retrieve_context(
     top_k: int = None,
     thread_summary: Optional[str] = None,
     image_context: Optional[str] = None,
+    topic: Optional[str] = None,
 ) -> list[dict]:
     """
     질문과 유사한 과거 대화 청크를 검색하여 반환한다.
@@ -141,6 +142,7 @@ def retrieve_context(
             query_text=search_query,
             channel_id=channel_id,
             top_k=pool_k,
+            topic=topic,
         )
         # 유사도 임계값 미만 청크 제거 (fallback 결과는 similarity=0.0이므로 제외 안 함)
         filtered = [
@@ -158,6 +160,7 @@ def retrieve_context(
                 query_text=image_context,
                 channel_id=channel_id,
                 top_k=pool_k,
+                topic=topic,
             )
             existing_ids = {r.get("message_id") for r in filtered}
             for r in image_results:

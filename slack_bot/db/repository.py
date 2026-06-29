@@ -215,16 +215,18 @@ def search_similar_embeddings(
     query_text: str = "",
     channel_id: Optional[str] = None,
     top_k: int = 5,
+    topic: Optional[str] = None,
 ) -> list[dict]:
     """
     쿼리 임베딩과 가장 유사한 청크를 반환한다.
     ENABLE_HYBRID_SEARCH=true이면 pg_trgm + pgvector RRF 검색,
     false이면 순수 벡터 검색, pgvector 비활성 시 텍스트 fallback.
+    topic이 제공될 경우 해당 주제를 가진 과거 문맥에 유사도 보너스(0.1)를 부여한다.
     """
     if config.ENABLE_VECTOR_SEARCH and query_embedding:
         if config.ENABLE_HYBRID_SEARCH and query_text:
-            return _hybrid_search(session, query_embedding, query_text, channel_id, top_k)
-        return _vector_search(session, query_embedding, channel_id, top_k)
+            return _hybrid_search(session, query_embedding, query_text, channel_id, top_k, topic)
+        return _vector_search(session, query_embedding, channel_id, top_k, topic)
     else:
         return _text_fallback_search(session, channel_id, top_k)
 
@@ -234,6 +236,7 @@ def _vector_search(
     query_embedding: list[float],
     channel_id: Optional[str],
     top_k: int,
+    topic: Optional[str] = None,
 ) -> list[dict]:
     """pgvector 코사인 유사도 검색."""
     vec_str = "[" + ",".join(str(v) for v in query_embedding) + "]"
@@ -244,15 +247,20 @@ def _vector_search(
         channel_filter = "WHERE m.channel_id = :channel_id"
         params["channel_id"] = channel_id
 
+    topic_boost_sql = ""
+    if topic and topic != "미분류":
+        topic_boost_sql = " + CASE WHEN m.topic = :topic THEN 0.1 ELSE 0.0 END "
+        params["topic"] = topic
+
     # CAST(:vec AS vector) 사용 — :vec::vector 형태는 SQLAlchemy 파라미터 파싱과 충돌
     sql = text(
         f"SELECT ce.chunk_text, "
-        f"1 - (ce.embedding <=> CAST(:vec AS vector)) AS similarity, "
+        f"1 - (ce.embedding <=> CAST(:vec AS vector)){topic_boost_sql} AS similarity, "
         f"ce.source_message_id, m.role, ce.chunk_type "
         f"FROM context_embedding ce "
         f"JOIN conversation_message m ON ce.source_message_id = m.id "
         f"{channel_filter} "
-        f"ORDER BY ce.embedding <=> CAST(:vec AS vector) "
+        f"ORDER BY 1 - (ce.embedding <=> CAST(:vec AS vector)){topic_boost_sql} DESC "
         f"LIMIT :top_k"
     )
     try:
@@ -279,6 +287,7 @@ def _hybrid_search(
     query_text: str,
     channel_id: Optional[str],
     top_k: int,
+    topic: Optional[str] = None,
 ) -> list[dict]:
     """
     pg_trgm(trigram 키워드) + pgvector(코사인) 검색을 RRF로 통합한다.
@@ -294,6 +303,11 @@ def _hybrid_search(
     if channel_id:
         channel_where = "AND m.channel_id = :channel_id"
         params["channel_id"] = channel_id
+        
+    topic_boost_sql = ""
+    if topic and topic != "미분류":
+        topic_boost_sql = " + CASE WHEN COALESCE(v.topic, t.topic) = :topic THEN 0.1 ELSE 0.0 END "
+        params["topic"] = topic
 
     sql = text(f"""
         WITH vector_ranked AS (
@@ -302,6 +316,7 @@ def _hybrid_search(
                    ce.source_message_id,
                    m.role,
                    ce.chunk_type,
+                   m.topic,
                    1 - (ce.embedding <=> CAST(:vec AS vector)) AS vec_sim,
                    ROW_NUMBER() OVER (ORDER BY ce.embedding <=> CAST(:vec AS vector)) AS vec_rank
             FROM context_embedding ce
@@ -317,6 +332,7 @@ def _hybrid_search(
                    ce.source_message_id,
                    m.role,
                    ce.chunk_type,
+                   m.topic,
                    word_similarity(:query_text, ce.chunk_text) AS trgm_sim,
                    ROW_NUMBER() OVER (
                        ORDER BY word_similarity(:query_text, ce.chunk_text) DESC
@@ -336,7 +352,8 @@ def _hybrid_search(
                 COALESCE(v.role, t.role) AS role,
                 COALESCE(v.chunk_type, t.chunk_type) AS chunk_type,
                 COALESCE(1.0 / ({rrf_k} + v.vec_rank), 0.0)
-                    + COALESCE(1.0 / ({rrf_k} + t.trgm_rank), 0.0) AS rrf_score
+                    + COALESCE(1.0 / ({rrf_k} + t.trgm_rank), 0.0)
+                    {topic_boost_sql} AS rrf_score
             FROM vector_ranked v
             FULL OUTER JOIN trgm_ranked t ON v.id = t.id
         )
@@ -1079,6 +1096,68 @@ def get_channel_history_by_topic(
         .all()
     )
     return _group_messages_by_topic(messages, max_per_topic, max_topics)
+
+
+def get_recent_qa_by_topic(
+    session: Session,
+    channel_id: str,
+    topic: str,
+    limit: int = 3,
+) -> list[dict]:
+    """
+    동일한 주제(topic)의 최근 질문과 봇 답변을 반환한다.
+    결과: [{"q_preview": str, "a_preview": str, "created_at": datetime}]
+    """
+    if not topic or topic == "미분류":
+        return []
+
+    # 해당 주제의 최근 사용자 질문 조회
+    questions = (
+        session.query(ConversationMessage)
+        .filter(
+            ConversationMessage.channel_id == channel_id,
+            ConversationMessage.topic == topic,
+            ConversationMessage.role == "user",
+            ConversationMessage.is_question == True,  # noqa: E712
+        )
+        .order_by(ConversationMessage.created_at.desc())
+        .limit(limit * 3)  # 답변이 없는 경우를 대비해 여유 있게 조회
+        .all()
+    )
+
+    results = []
+    seen_threads = set()
+    for q in questions:
+        thread_id = q.thread_ts or q.message_ts
+        if thread_id in seen_threads:
+            continue
+
+        # 같은 스레드에서 질문 이후의 첫 번째 봇 답변 조회
+        bot_msg = (
+            session.query(ConversationMessage)
+            .filter(
+                ConversationMessage.channel_id == channel_id,
+                ConversationMessage.thread_ts == thread_id,
+                ConversationMessage.role == "bot",
+                ConversationMessage.created_at >= q.created_at,
+            )
+            .order_by(ConversationMessage.created_at.asc())
+            .first()
+        )
+        
+        if bot_msg and bot_msg.content:
+            q_text = q.content or ""
+            a_text = bot_msg.content or ""
+            results.append({
+                "q_preview": q_text[:80] + ("…" if len(q_text) > 80 else ""),
+                "a_preview": a_text[:120] + ("…" if len(a_text) > 120 else ""),
+                "created_at": q.created_at,
+            })
+            seen_threads.add(thread_id)
+            if len(results) >= limit:
+                break
+
+    return results
 
 
 def get_dashboard_stats(session: Session, period_days: int = 7) -> dict:

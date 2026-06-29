@@ -941,6 +941,7 @@ def _process_question(
     image_context: Optional[str] = None,
     show_thread_tip: bool = False,
     product_key: Optional[str] = None,
+    topic: Optional[str] = None,
 ) -> None:
     """
     LLM으로 질문에 답변을 생성하고 Slack에 전송한다.
@@ -962,6 +963,7 @@ def _process_question(
             channel_id=effective_rag_channel,
             thread_summary=thread_summary,
             image_context=image_context,
+            topic=topic,
         )
         context_text = format_context_for_prompt(contexts)
 
@@ -1080,6 +1082,13 @@ def _process_question(
 
         # 8. 답변 전송 (Block Kit)
         context_count = len(contexts)
+        
+        # 같은 주제의 과거 Q&A 조회
+        related_qa = []
+        if topic and topic != "미분류":
+            from db.repository import get_recent_qa_by_topic
+            related_qa = get_recent_qa_by_topic(session, channel_id, topic, limit=3)
+            
         sent_ts = post_answer(
             client=client,
             channel=channel_id,
@@ -1088,6 +1097,7 @@ def _process_question(
             context_count=context_count,
             thinking_ts=thinking_ts,
             show_thread_tip=show_thread_tip,
+            related_qa=related_qa,
         )
 
         # 9. 피드백 이모지 시드 추가 (reactions:write 스코프 필요)
@@ -1467,6 +1477,7 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
                 image_context=image_context or None,
                 show_thread_tip=is_new_thread,
                 product_key=_product_key,
+                topic=_topic,
             )
 
         threading.Thread(target=worker, daemon=True).start()
@@ -1586,6 +1597,7 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
                     rag_channel_id=None,
                     image_context=image_ctx or None,
                     product_key=_dm_product_key,
+                    topic=_dm_topic,
                 )
                 return
 
