@@ -120,6 +120,7 @@ def analyze_slack_files(files: list[dict], bot_token: str) -> str:
 
         if image_results:
             logger.info(f"이미지 분석 완료: {len(image_results)}/{count}장")
+            logger.debug(f"이미지 분석 결과(앞 500자):\n{chr(10).join(image_results)[:500]}")
         else:
             logger.warning(f"이미지 분석 전체 실패: {count}장")
 
