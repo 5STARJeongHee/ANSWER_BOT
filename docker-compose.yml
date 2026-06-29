@@ -42,6 +42,10 @@ services:
       LLM_BACKEND: ${LLM_BACKEND:-openrouter}
       # Ollama 사용 시 컨테이너 내부 서비스 주소 (호스트 직접 실행이면 http://host.docker.internal:11434/v1)
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434/v1}
+      REDIS_URL: redis://redis:6379/0
+      METRICS_PORT: 8000
+    ports:
+      - "28000:8000"
     volumes:
       - ./properties.yml:/app/properties.yml:ro
       - fastembed_cache:/root/.cache/fastembed
@@ -73,10 +77,21 @@ services:
           memory: 32gb       # LLM 스택이 순간적으로 폭주해도 최대 32GB까지만 메모리 허용
     # CPU 전용 서버이므로 GPU 설정 없음. AVX512는 llama.cpp가 자동 감지.
 
+  redis:
+    image: redis:7-alpine
+    container_name: slackbot_redis
+    restart: unless-stopped
+    ports:
+      - "26379:6379"
+    volumes:
+      - redis_data:/data
+
 volumes:
   pgdata:
     driver: local
   fastembed_cache:
     driver: local
   ollama_models:
+    driver: local
+  redis_data:
     driver: local

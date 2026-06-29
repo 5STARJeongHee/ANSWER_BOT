@@ -28,6 +28,14 @@ def main() -> None:
         logger.critical(f"환경변수 설정 오류로 종료: {exc}")
         sys.exit(1)
 
+    # 1-1. 모니터링 메트릭 서버 시작
+    try:
+        from prometheus_client import start_http_server
+        start_http_server(config.METRICS_PORT)
+        logger.info(f"Prometheus 메트릭 서버 시작 완료 (포트: {config.METRICS_PORT})")
+    except Exception as exc:
+        logger.error(f"메트릭 서버 시작 실패: {exc}")
+
     # 2. DB 엔진 및 세션 팩토리 초기화
     logger.info("데이터베이스 초기화 중...")
     from db.models import get_engine, get_session_factory, init_db

@@ -1,4 +1,4 @@
-﻿# 환경변수 로드 및 전체 설정값 관리 모듈
+# 환경변수 로드 및 전체 설정값 관리 모듈
 from __future__ import annotations
 import os
 import logging
@@ -105,8 +105,12 @@ else:
     SUMMARY_FALLBACK_CHAIN = [SUMMARY_MODEL, "openai/gpt-oss-120b:free"]
     RAG_QUERY_FALLBACK_CHAIN = [RAG_QUERY_MODEL, CLASSIFIER_MODEL]
 
-# --- 데이터베이스 설정 ---
+# --- 데이터베이스 및 캐시 설정 ---
 DATABASE_URL: str = os.getenv("DATABASE_URL", "")
+REDIS_URL: str = os.getenv("REDIS_URL", "")
+
+# --- 모니터링 설정 ---
+METRICS_PORT: int = int(os.getenv("METRICS_PORT", "8000"))
 
 # --- 벡터 검색 설정 ---
 ENABLE_VECTOR_SEARCH: bool = os.getenv("ENABLE_VECTOR_SEARCH", "true").lower() == "true"

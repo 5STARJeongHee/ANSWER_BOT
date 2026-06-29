@@ -4,10 +4,25 @@ import logging
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
+import json
 
 from services.llm_service import call_classifier, parse_json_response
+import config
 
 logger = logging.getLogger(__name__)
+
+# Redis 클라이언트 초기화
+_redis_client = None
+if config.REDIS_URL:
+    try:
+        import redis
+        _redis_client = redis.from_url(config.REDIS_URL, decode_responses=True)
+        # Test connection
+        _redis_client.ping()
+        logger.info(f"Redis 캐시 연동 성공: {config.REDIS_URL}")
+    except Exception as exc:
+        logger.warning(f"Redis 연결 실패, 인메모리 캐시로 대체합니다: {exc}")
+        _redis_client = None
 
 # 분류 캐시 (동일 메시지 중복 호출 방지)
 _classify_cache: dict[str, "ClassifyResult"] = {}
@@ -34,6 +49,24 @@ class ClassifyResult:
             confidence=1.0,
             reason="분류 불필요",
             is_actionable=False,
+        )
+
+    def to_json(self) -> str:
+        return json.dumps({
+            "category": self.category.value,
+            "confidence": self.confidence,
+            "reason": self.reason,
+            "is_actionable": self.is_actionable,
+        })
+
+    @classmethod
+    def from_json(cls, data: str) -> "ClassifyResult":
+        parsed = json.loads(data)
+        return cls(
+            category=MessageCategory(parsed["category"]),
+            confidence=parsed["confidence"],
+            reason=parsed["reason"],
+            is_actionable=parsed["is_actionable"],
         )
 
 
@@ -96,10 +129,19 @@ def classify_message(
         )
 
     # 캐시 조회
-    cache_key = message[:200]  # 200자까지만 키로 사용
-    if cache_key in _classify_cache:
-        logger.debug(f"분류 캐시 히트: {cache_key[:50]!r}")
-        return _classify_cache[cache_key]
+    cache_key = f"classify:{message[:200]}"  # 200자까지만 키로 사용
+    if _redis_client:
+        try:
+            cached_val = _redis_client.get(cache_key)
+            if cached_val:
+                logger.debug(f"Redis 분류 캐시 히트: {cache_key[:50]!r}")
+                return ClassifyResult.from_json(cached_val)
+        except Exception as exc:
+            logger.warning(f"Redis 캐시 읽기 실패: {exc}")
+    else:
+        if cache_key in _classify_cache:
+            logger.debug(f"인메모리 분류 캐시 히트: {cache_key[:50]!r}")
+            return _classify_cache[cache_key]
 
     # LLM 분류 호출
     llm_messages = [
@@ -125,12 +167,18 @@ def classify_message(
         is_actionable=category in (MessageCategory.QUESTION, MessageCategory.REQUEST),
     )
 
-    # 캐시 저장 (크기 제한)
-    if len(_classify_cache) >= _CACHE_MAX_SIZE:
-        # 가장 오래된 항목 제거 (FIFO)
-        oldest_key = next(iter(_classify_cache))
-        del _classify_cache[oldest_key]
-    _classify_cache[cache_key] = result
+    # 캐시 저장 (Redis는 TTL 7일, 인메모리는 크기 제한)
+    if _redis_client:
+        try:
+            _redis_client.setex(cache_key, 604800, result.to_json()) # 7 days
+        except Exception as exc:
+            logger.warning(f"Redis 캐시 저장 실패: {exc}")
+    else:
+        if len(_classify_cache) >= _CACHE_MAX_SIZE:
+            # 가장 오래된 항목 제거 (FIFO)
+            oldest_key = next(iter(_classify_cache))
+            del _classify_cache[oldest_key]
+        _classify_cache[cache_key] = result
 
     logger.info(
         f"분류 결과: {category.value} (신뢰도={result.confidence:.2f}) | "

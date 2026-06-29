@@ -39,3 +39,7 @@ pypdf>=4.0.0             # pdf 텍스트 추출
 
 # 로깅
 structlog==24.4.0
+
+# 모니터링 & 분산 캐시
+prometheus-client==0.20.0
+redis==5.0.3
