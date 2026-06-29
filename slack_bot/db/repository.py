@@ -996,6 +996,91 @@ def get_channel_history_by_date(
     return result
 
 
+def _group_messages_by_topic(
+    messages: list,
+    max_per_topic: int = 3,
+    max_topics: int = 10,
+) -> tuple[list[dict], int]:
+    """
+    메시지 목록(created_at asc 정렬 가정)을 스레드 단위로 묶고 topic별로 그룹핑한다.
+    순수 인메모리 로직 — DB 의존성 없음.
+    Returns: (topic_groups, total_question_count)
+    """
+    from collections import defaultdict as _dd
+
+    # 스레드 단위 그룹핑 (effective key = thread_ts or message_ts)
+    thread_msgs: dict[str, list] = _dd(list)
+    for msg in messages:
+        key = msg.thread_ts or msg.message_ts
+        thread_msgs[key].append(msg)
+
+    topic_counts: dict[str, int] = _dd(int)
+    topic_entries: dict[str, list] = _dd(list)
+
+    for msgs in thread_msgs.values():
+        for i, msg in enumerate(msgs):
+            if msg.role != "user" or not msg.is_question:
+                continue
+            topic = msg.topic or "미분류"
+            topic_counts[topic] += 1
+
+            if len(topic_entries[topic]) < max_per_topic:
+                # 같은 스레드 내 이 질문 이후 첫 번째 봇 답변 찾기
+                a_preview: Optional[str] = None
+                for subsequent in msgs[i + 1:]:
+                    if subsequent.role == "bot":
+                        a_text = subsequent.content or ""
+                        a_preview = a_text[:60] + ("…" if len(a_text) > 60 else "")
+                        break
+
+                q_text = msg.content or ""
+                topic_entries[topic].append({
+                    "q_preview": q_text[:60] + ("…" if len(q_text) > 60 else ""),
+                    "a_preview": a_preview,
+                    "created_at": msg.created_at,
+                    "user_id": msg.user_id,
+                })
+
+    total_count = sum(topic_counts.values())
+
+    sorted_topics = sorted(
+        topic_counts.items(),
+        key=lambda x: (x[0] == "미분류", -x[1]),
+    )
+
+    result = [
+        {"topic": topic, "count": count, "entries": topic_entries[topic]}
+        for topic, count in sorted_topics[:max_topics]
+    ]
+    return result, total_count
+
+
+def get_channel_history_by_topic(
+    session: Session,
+    channel_id: str,
+    days: int = 7,
+    max_per_topic: int = 3,
+    max_topics: int = 10,
+) -> tuple[list[dict], int]:
+    """
+    최근 N일 채널 질문 이력을 canonical topic별로 묶어 반환한다.
+    Returns: (topic_groups, total_question_count)
+      topic_groups: [{topic, count, entries: [{q_preview, a_preview, created_at, user_id}]}, ...]
+                     count 내림차순, 미분류 마지막.
+    """
+    since = datetime.utcnow() - timedelta(days=days)
+    messages = (
+        session.query(ConversationMessage)
+        .filter(
+            ConversationMessage.channel_id == channel_id,
+            ConversationMessage.created_at >= since,
+        )
+        .order_by(ConversationMessage.created_at.asc())
+        .all()
+    )
+    return _group_messages_by_topic(messages, max_per_topic, max_topics)
+
+
 def get_dashboard_stats(session: Session, period_days: int = 7) -> dict:
     """챗봇 대시보드 집계 통계를 반환한다."""
     since = datetime.utcnow() - timedelta(days=period_days)

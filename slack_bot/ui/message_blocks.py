@@ -570,6 +570,130 @@ def build_history_blocks(
 
 
 # ---------------------------------------------------------------------------
+# 주제별 대화 이력 블록
+# ---------------------------------------------------------------------------
+
+def build_history_grouped_blocks(
+    topic_groups: list[dict],
+    total_count: int,
+    channel_name: str = "이 채널",
+    days: int = 7,
+) -> dict:
+    """
+    topic별로 묶인 대화 이력을 Block Kit 페이로드로 반환한다.
+    topic_groups: get_channel_history_by_topic() 반환값.
+    """
+    blocks: list[dict] = [
+        {
+            "type": "header",
+            "text": {
+                "type": "plain_text",
+                "text": f"📋 {channel_name} 주제별 대화 이력",
+                "emoji": True,
+            },
+        },
+    ]
+
+    if not topic_groups:
+        blocks.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "_아직 저장된 질문이 없습니다. `@QNA BOT 질문내용` 으로 질문해 보세요!_",
+                },
+            }
+        )
+        return {"text": f"{channel_name} 주제별 대화 이력", "blocks": blocks}
+
+    all_unclassified = all(g["topic"] == "미분류" for g in topic_groups)
+    if all_unclassified:
+        blocks.append(
+            {
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": ":bulb: 주제 분류가 아직 실행되지 않았습니다. `@QNA BOT 정규화 실행` 으로 주제를 분류할 수 있습니다.",
+                    }
+                ],
+            }
+        )
+
+    for group in topic_groups:
+        topic: str = group["topic"]
+        count: int = group["count"]
+        entries: list[dict] = group["entries"]
+
+        blocks.append({"type": "divider"})
+        blocks.append(
+            {
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": f"*🏷️ {topic}* — {count}건",
+                    }
+                ],
+            }
+        )
+
+        lines: list[str] = []
+        for entry in entries:
+            created_at = entry.get("created_at")
+            day_str = created_at.strftime("%m.%d") if created_at else "??"
+            user_id = entry.get("user_id")
+            user_mention = f"<@{user_id}>" if user_id else "익명"
+            q_preview = entry.get("q_preview", "")
+            a_preview = entry.get("a_preview")
+
+            line = f"• {day_str} {user_mention}\n  _Q: {q_preview}_"
+            if a_preview:
+                line += f"\n  _A: {a_preview}_"
+            lines.append(line)
+
+        if lines:
+            section_text = "\n".join(lines)
+            if len(section_text) > 2900:
+                section_text = section_text[:2900] + "…"
+            blocks.append(
+                {
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": section_text},
+                }
+            )
+
+        overflow = count - len(entries)
+        if overflow > 0:
+            blocks.append(
+                {
+                    "type": "context",
+                    "elements": [
+                        {"type": "mrkdwn", "text": f"_+{overflow}건 더 있음_"}
+                    ],
+                }
+            )
+
+    topic_count = len(topic_groups)
+    blocks.append(
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": f":information_source: 최근 {days}일 · 총 {total_count}건 · {topic_count}개 주제",
+                }
+            ],
+        }
+    )
+
+    return {
+        "text": f"{channel_name} 주제별 대화 이력 {total_count}건 ({topic_count}개 주제)",
+        "blocks": blocks,
+    }
+
+
+# ---------------------------------------------------------------------------
 # 대시보드 통계 블록
 # ---------------------------------------------------------------------------
 

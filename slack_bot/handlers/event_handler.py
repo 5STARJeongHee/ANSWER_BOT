@@ -15,6 +15,7 @@ from db.repository import (
     get_thread_starter_user_id,
     get_channel_question_history,
     get_channel_history_by_date,
+    get_channel_history_by_topic,
     get_dashboard_stats,
     get_recent_fallbacks,
     get_top_topics,
@@ -49,6 +50,7 @@ from services.slack_service import (
 from ui.message_blocks import (
     build_intro_blocks,
     build_history_blocks,
+    build_history_grouped_blocks,
     build_dashboard_blocks,
 )
 from services.summarizer import summarize_thread_context
@@ -1243,9 +1245,18 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
             def history_worker():
                 hist_session = session_factory()
                 try:
-                    grouped = get_channel_history_by_date(hist_session, channel_id, days=history_days)
+                    topic_groups, total_count = get_channel_history_by_topic(
+                        hist_session, channel_id, days=history_days
+                    )
                     channel_label = f"<#{channel_id}>"
-                    payload = build_history_blocks(grouped, channel_label, days=history_days)
+                    if topic_groups:
+                        payload = build_history_grouped_blocks(
+                            topic_groups, total_count, channel_label, days=history_days
+                        )
+                    else:
+                        # 질문이 아예 없으면 날짜별 뷰로 폴백 (빈 상태 메시지 표시)
+                        grouped = get_channel_history_by_date(hist_session, channel_id, days=history_days)
+                        payload = build_history_blocks(grouped, channel_label, days=history_days)
                     post_message(
                         client=client,
                         channel=channel_id,
