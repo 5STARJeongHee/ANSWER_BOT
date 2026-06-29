@@ -249,18 +249,22 @@ def _vector_search(
 
     topic_boost_sql = ""
     if topic and topic != "미분류":
-        topic_boost_sql = " + CASE WHEN m.topic = :topic THEN 0.1 ELSE 0.0 END "
+        topic_boost_sql = " + CASE WHEN m.topic = :topic THEN 0.1 ELSE 0.0 END"
         params["topic"] = topic
 
+    # 서브쿼리로 similarity를 한 번만 계산하고 외부 ORDER BY에서 컬럼명으로 참조한다.
     # CAST(:vec AS vector) 사용 — :vec::vector 형태는 SQLAlchemy 파라미터 파싱과 충돌
     sql = text(
-        f"SELECT ce.chunk_text, "
-        f"1 - (ce.embedding <=> CAST(:vec AS vector)){topic_boost_sql} AS similarity, "
-        f"ce.source_message_id, m.role, ce.chunk_type "
-        f"FROM context_embedding ce "
-        f"JOIN conversation_message m ON ce.source_message_id = m.id "
-        f"{channel_filter} "
-        f"ORDER BY 1 - (ce.embedding <=> CAST(:vec AS vector)){topic_boost_sql} DESC "
+        f"SELECT chunk_text, similarity, source_message_id, role, chunk_type "
+        f"FROM ("
+        f"  SELECT ce.chunk_text,"
+        f"  1 - (ce.embedding <=> CAST(:vec AS vector)){topic_boost_sql} AS similarity,"
+        f"  ce.source_message_id, m.role, ce.chunk_type "
+        f"  FROM context_embedding ce "
+        f"  JOIN conversation_message m ON ce.source_message_id = m.id "
+        f"  {channel_filter}"
+        f") sub "
+        f"ORDER BY similarity DESC "
         f"LIMIT :top_k"
     )
     try:
