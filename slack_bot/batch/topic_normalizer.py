@@ -45,46 +45,41 @@ def _fetch_distinct_topics(session: Session) -> dict[str, int]:
     return {row[0]: row[1] for row in rows}
 
 
-def _group_topics_by_llm(topic_counts: dict[str, int]) -> dict[str, str]:
+_NORMALIZE_CHUNK_SIZE = 80
+
+
+def _group_chunk_by_llm(chunk: list[dict]) -> dict[str, str]:
     """
-    distinct topic 목록을 LLM 한 번 호출로 그룹핑하고
+    topic 청크(최대 _NORMALIZE_CHUNK_SIZE개)를 LLM으로 그룹핑하고
     {raw_topic: canonical_topic} 맵을 반환한다.
-    LLM 실패 또는 파싱 실패 시 빈 dict를 반환한다.
     """
-    if not topic_counts:
-        return {}
-
-    topic_list = [
-        {"topic": t, "count": n} for t, n in topic_counts.items()
-    ]
     user_content = (
-        f"다음 {len(topic_list)}개의 topic을 의미별로 그룹핑하고 canonical 이름을 정해줘.\n\n"
-        f"topic 목록 (topic: 출현 횟수):\n"
-        + json.dumps(topic_list, ensure_ascii=False, indent=2)
+        f"다음 {len(chunk)}개의 topic을 의미별로 그룹핑하고 canonical 이름을 정해줘.\n\n"
+        "topic 목록 (topic: 출현 횟수):\n"
+        + json.dumps(chunk, ensure_ascii=False, indent=2)
     )
-
     messages = [
         {"role": "system", "content": _NORMALIZE_SYSTEM_PROMPT},
         {"role": "user", "content": user_content},
     ]
+    # 청크당 최소 80토큰 * 청크 크기 확보 (JSON 구조 오버헤드 포함)
+    max_tokens = max(4000, len(chunk) * 80)
 
     raw = call_with_fallback(
         model_chain=config.SUMMARY_FALLBACK_CHAIN,
         messages=messages,
-        max_tokens=3000,
+        max_tokens=max_tokens,
         response_format={"type": "json_object"},
     )
     if not raw:
-        logger.error("LLM 그룹핑 호출 실패")
         return {}
 
     parsed = parse_json_response(raw, default={"groups": []})
     groups = parsed.get("groups", [])
     if not isinstance(groups, list):
-        logger.error(f"LLM 응답 형식 오류: groups가 list가 아님 ({type(groups)})")
         return {}
 
-    canonical_map: dict[str, str] = {}
+    result: dict[str, str] = {}
     for group in groups:
         canonical = str(group.get("canonical", "")).strip()
         members = group.get("members", [])
@@ -93,11 +88,45 @@ def _group_topics_by_llm(topic_counts: dict[str, int]) -> dict[str, str]:
         for member in members:
             raw_topic = str(member).strip()
             if raw_topic:
-                canonical_map[raw_topic] = canonical
+                result[raw_topic] = canonical
+    return result
 
+
+def _group_topics_by_llm(topic_counts: dict[str, int]) -> dict[str, str]:
+    """
+    distinct topic 목록을 _NORMALIZE_CHUNK_SIZE 단위 청크로 나눠 LLM에 전달하고
+    {raw_topic: canonical_topic} 맵을 반환한다.
+    LLM 실패 또는 파싱 실패 시 빈 dict를 반환한다.
+    """
+    if not topic_counts:
+        return {}
+
+    topic_list = [{"topic": t, "count": n} for t, n in topic_counts.items()]
+    chunks = [
+        topic_list[i: i + _NORMALIZE_CHUNK_SIZE]
+        for i in range(0, len(topic_list), _NORMALIZE_CHUNK_SIZE)
+    ]
+    logger.info(
+        f"LLM 그룹핑 시작: {len(topic_counts)}개 topic → "
+        f"{len(chunks)}개 청크 (청크당 최대 {_NORMALIZE_CHUNK_SIZE}개)"
+    )
+
+    canonical_map: dict[str, str] = {}
+    failed_chunks = 0
+    for idx, chunk in enumerate(chunks, 1):
+        chunk_result = _group_chunk_by_llm(chunk)
+        if not chunk_result:
+            logger.warning(f"청크 {idx}/{len(chunks)} 그룹핑 실패 또는 빈 응답")
+            failed_chunks += 1
+        else:
+            canonical_map.update(chunk_result)
+            logger.debug(f"청크 {idx}/{len(chunks)} 완료: 매핑 {len(chunk_result)}건 추가")
+
+    total_groups = len({v for v in canonical_map.values()})
     logger.info(
         f"LLM 그룹핑 완료: {len(topic_counts)}개 distinct topic → "
-        f"{len(groups)}개 그룹, 매핑 {len(canonical_map)}건"
+        f"{total_groups}개 그룹, 매핑 {len(canonical_map)}건 "
+        f"(실패 청크 {failed_chunks}/{len(chunks)})"
     )
     return canonical_map
 
@@ -162,7 +191,7 @@ def run_normalize_batch(
         canonical_map = _group_topics_by_llm(topic_counts)
         if not canonical_map:
             stats["errors"] += 1
-            logger.error("LLM 그룹핑 결과 없음 — 정규화를 중단합니다.")
+            logger.error("LLM 그룹핑 결과 없음 (전 청크 실패) — 정규화를 중단합니다.")
             return stats
 
         # LLM이 반환한 raw가 실제 DB topic에 있는 것만 유효
