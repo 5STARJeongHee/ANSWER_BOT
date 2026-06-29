@@ -10,6 +10,7 @@ from typing import Optional
 from openai import OpenAI, RateLimitError, APIError, APITimeoutError
 
 import config
+from utils.metrics import LLM_REQUEST_DURATION_SECONDS
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +39,7 @@ def _call_with_retry(
     max_tokens: int,
     response_format: Optional[dict] = None,
     max_retries: int = None,
+    **extra_kwargs,
 ) -> Optional[str]:
     """
     단일 모델로 API를 호출하고 지수 백오프로 재시도한다.
@@ -51,6 +53,7 @@ def _call_with_retry(
         "messages": messages,
         "max_tokens": max_tokens,
     }
+    kwargs.update(extra_kwargs)
     if response_format:
         kwargs["response_format"] = response_format
 
@@ -92,25 +95,33 @@ def call_with_fallback(
     messages: list[dict],
     max_tokens: int,
     response_format: Optional[dict] = None,
+    endpoint_type: str = "",
 ) -> Optional[str]:
     """
     fallback 체인 순서대로 모델을 시도하고 첫 성공 응답을 반환한다.
     모든 모델 실패 시 None을 반환한다.
     """
-    for model in model_chain:
-        result = _call_with_retry(
-            model=model,
-            messages=messages,
-            max_tokens=max_tokens,
-            response_format=response_format,
-        )
-        if result is not None:
-            if model != model_chain[0]:
-                logger.info(f"Fallback 모델 사용: {model}")
-            return result
-        logger.warning(f"모델 실패, 다음 fallback으로: {model}")
-
-    return None
+    primary_model = model_chain[0]
+    _t0 = time.monotonic()
+    try:
+        for model in model_chain:
+            result = _call_with_retry(
+                model=model,
+                messages=messages,
+                max_tokens=max_tokens,
+                response_format=response_format,
+            )
+            if result is not None:
+                if model != primary_model:
+                    logger.info(f"Fallback 모델 사용: {model}")
+                return result
+            logger.warning(f"모델 실패, 다음 fallback으로: {model}")
+        return None
+    finally:
+        if endpoint_type:
+            LLM_REQUEST_DURATION_SECONDS.labels(
+                model=primary_model, endpoint_type=endpoint_type
+            ).observe(time.monotonic() - _t0)
 
 
 def call_classifier(messages: list[dict]) -> Optional[str]:
@@ -120,6 +131,7 @@ def call_classifier(messages: list[dict]) -> Optional[str]:
         messages=messages,
         max_tokens=config.CLASSIFIER_MAX_TOKENS,
         response_format={"type": "json_object"},
+        endpoint_type="classifier",
     )
 
 
@@ -129,6 +141,7 @@ def call_qa(messages: list[dict]) -> Optional[str]:
         model_chain=config.QA_FALLBACK_CHAIN,
         messages=messages,
         max_tokens=config.QA_MAX_TOKENS,
+        endpoint_type="qa",
     )
 
 
@@ -138,6 +151,7 @@ def call_summary(messages: list[dict]) -> Optional[str]:
         model_chain=config.SUMMARY_FALLBACK_CHAIN,
         messages=messages,
         max_tokens=config.SUMMARY_MAX_TOKENS,
+        endpoint_type="summary",
     )
 
 
@@ -147,6 +161,7 @@ def call_rag_query(messages: list[dict]) -> Optional[str]:
         model_chain=config.RAG_QUERY_FALLBACK_CHAIN,
         messages=messages,
         max_tokens=100,
+        endpoint_type="rag_query",
     )
 
 
@@ -159,11 +174,24 @@ def call_vision(images_b64: list[str], prompt: str) -> Optional[str]:
             "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
         })
     messages = [{"role": "user", "content": content}]
-    return _call_with_retry(
-        model=config.IMAGE_MODEL,
-        messages=messages,
-        max_tokens=600 * len(images_b64),
-    )
+    
+    # qwen2-vl 등 vision 모델 안정화를 위한 파라미터 적용
+    vision_kwargs = {"temperature": 0.1}
+    if config.LLM_BACKEND == "ollama":
+        vision_kwargs["extra_body"] = {"options": {"num_ctx": 4096}}
+
+    _t0 = time.monotonic()
+    try:
+        return _call_with_retry(
+            model=config.IMAGE_MODEL,
+            messages=messages,
+            max_tokens=600 * len(images_b64),
+            **vision_kwargs
+        )
+    finally:
+        LLM_REQUEST_DURATION_SECONDS.labels(
+            model=config.IMAGE_MODEL, endpoint_type="vision"
+        ).observe(time.monotonic() - _t0)
 
 
 _FEEDBACK_REASONS = frozenset({"wrong_source", "hallucination", "out_of_scope", "format_issue"})

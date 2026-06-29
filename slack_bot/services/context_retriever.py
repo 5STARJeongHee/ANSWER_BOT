@@ -173,6 +173,9 @@ def retrieve_context(
 
         final = filtered[:top_k]
 
+        from utils.metrics import RAG_SEARCH_TOTAL
+        RAG_SEARCH_TOTAL.inc()
+
         query_preview = repr(search_query[:50])
         logger.info(
             f"RAG 검색 완료: {len(final)}건 / 후보 {len(results)}건 "

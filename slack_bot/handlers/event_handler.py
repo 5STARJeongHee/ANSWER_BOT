@@ -9,6 +9,7 @@ from typing import Optional
 from slack_bolt import App
 
 import config
+from utils.metrics import MESSAGE_PROCESSED_TOTAL
 from db.models import get_session_factory
 from db.repository import (
     upsert_message,
@@ -1094,6 +1095,8 @@ def _process_question(
             from ui.reaction_handler import add_feedback_reactions
             add_feedback_reactions(client=client, channel=channel_id, message_ts=sent_ts)
 
+        MESSAGE_PROCESSED_TOTAL.labels(status="success").inc()
+
         # 10. 봇 응답 저장 (응답 시간·입출력 토큰·RAG·웹검색 메타 함께 기록)
         _elapsed_ms = int((time.monotonic() - _start_time) * 1000)
         _save_message_and_embed(
@@ -1115,6 +1118,7 @@ def _process_question(
 
     except Exception as exc:
         logger.error(f"질문 처리 중 오류: {exc}", exc_info=True)
+        MESSAGE_PROCESSED_TOTAL.labels(status="error").inc()
         _send_error_or_fallback(
             client=client,
             channel_id=channel_id,
@@ -1666,6 +1670,9 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
                 finally:
                     _ch_prod_session.close()
                 _topic, _product_key = extract_topic_and_product(effective_content, _ch_products)
+            if not classify_result.is_actionable:
+                MESSAGE_PROCESSED_TOTAL.labels(status="ignored").inc()
+
             _save_message_and_embed(
                 session_factory=session_factory,
                 event_id=event_id,
