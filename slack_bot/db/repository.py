@@ -1558,3 +1558,95 @@ def mark_product_notified(session: Session, product_key: str) -> None:
         cat.notified_at = datetime.utcnow()
         cat.updated_at = datetime.utcnow()
         session.flush()
+
+
+def get_topic_candidates(
+    session: Session,
+    min_count: int = 5,
+    limit: int = 20,
+) -> list[dict]:
+    """
+    미분류 질문이 min_count건 이상 누적된 topic 후보를 반환한다.
+    정규화 배치 실행 후 conversation_message.topic이 canonical 이름으로 통일된
+    상태를 전제로 한다. product_key가 NULL인 메시지만 집계하여 이미 분류된
+    주제는 포함하지 않는다.
+    반환: [{"topic": str, "question_count": int, "distinct_channels": int}]
+    """
+    rows = session.execute(
+        text(
+            "SELECT topic, "
+            "       COUNT(*) AS question_count, "
+            "       COUNT(DISTINCT channel_id) AS distinct_channels "
+            "FROM conversation_message "
+            "WHERE role = 'user' "
+            "  AND is_question = true "
+            "  AND topic IS NOT NULL "
+            "  AND topic NOT IN ('미분류', '없음', '') "
+            "  AND product_key IS NULL "
+            "GROUP BY topic "
+            "HAVING COUNT(*) >= :min_count "
+            "ORDER BY question_count DESC "
+            "LIMIT :limit"
+        ),
+        {"min_count": min_count, "limit": limit},
+    ).fetchall()
+
+    return [
+        {
+            "topic": row[0],
+            "question_count": row[1],
+            "distinct_channels": row[2],
+        }
+        for row in rows
+    ]
+
+
+def promote_topic_to_product(
+    session: Session,
+    topic: str,
+    product_key: str,
+    display_name: str,
+) -> bool:
+    """
+    topic을 정식 ProductCategory로 승격한다.
+    이미 product_key가 존재하면 False를 반환한다.
+    승격 후 해당 topic을 가진 미분류 메시지에 product_key를 백필한다.
+    commit은 호출자가 처리한다.
+    """
+    existing = get_product_category(session, product_key)
+    if existing:
+        return False
+
+    session.add(
+        ProductCategory(
+            product_key=product_key,
+            display_name=display_name,
+            aliases_json="[]",
+            owner_user_ids_json="[]",
+            question_count=0,
+        )
+    )
+    session.flush()
+
+    result = session.execute(
+        text(
+            "UPDATE conversation_message "
+            "SET product_key = :key "
+            "WHERE topic = :topic "
+            "  AND product_key IS NULL"
+        ),
+        {"key": product_key, "topic": topic},
+    )
+    backfill_count = result.rowcount
+    logger.info(
+        f"[promote_topic] topic={topic!r} → product_key={product_key!r}, "
+        f"백필 {backfill_count}건"
+    )
+
+    cat = get_product_category(session, product_key)
+    if cat:
+        cat.question_count = backfill_count
+        cat.updated_at = datetime.utcnow()
+        session.flush()
+
+    return True

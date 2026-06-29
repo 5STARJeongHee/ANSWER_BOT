@@ -894,3 +894,67 @@ def build_dashboard_blocks(
         "text": f"QNA BOT 대시보드 (최근 {period_label}): 총 응답 {total}건",
         "blocks": blocks,
     }
+
+
+# ---------------------------------------------------------------------------
+# 제품 후보 블록 (B방향 동적 발견)
+# ---------------------------------------------------------------------------
+
+def build_topic_candidates_blocks(candidates: list[dict]) -> dict:
+    """미분류 질문이 누적된 topic 후보 목록 Block Kit 페이로드를 반환한다."""
+    if not candidates:
+        return {
+            "text": "제품 후보 없음",
+            "blocks": [
+                {
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": "📭 아직 제품 후보가 없습니다.\n미분류 질문이 5건 이상 쌓인 주제가 나타나면 여기에 표시됩니다."},
+                }
+            ],
+        }
+
+    blocks: list[dict] = [
+        {"type": "header", "text": {"type": "plain_text", "text": "📋 제품 후보 목록"}},
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": "미분류 질문이 5건 이상 쌓인 주제입니다. `제품 등록 <주제명>`으로 정식 제품으로 등록하세요.",
+                }
+            ],
+        },
+        {"type": "divider"},
+    ]
+
+    for c in candidates:
+        topic = c["topic"]
+        q_count = c["question_count"]
+        ch_count = c["distinct_channels"]
+        blocks.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"*{topic}*\n질문 {q_count}건 · 채널 {ch_count}곳",
+                },
+            }
+        )
+
+    blocks.append({"type": "divider"})
+    blocks.append(
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": "등록 명령: `제품 등록 <주제명>` · 등록 후 `담당자 설정`으로 담당자를 지정할 수 있습니다.",
+                }
+            ],
+        }
+    )
+
+    return {
+        "text": f"제품 후보 {len(candidates)}건",
+        "blocks": blocks,
+    }

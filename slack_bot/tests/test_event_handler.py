@@ -50,6 +50,8 @@ from handlers.event_handler import (
     _save_message_and_embed,
     _send_error_or_fallback,
     _delete_thinking_msg,
+    _parse_product_candidate_command,
+    _topic_to_product_key,
 )
 
 
@@ -259,3 +261,52 @@ class TestSendErrorOrFallback:
             thread_ts="ts",
             thinking_ts="think_ts",
         )
+
+
+class TestParseProductCandidateCommand:
+    def test_list_exact_keyword(self):
+        action, topic = _parse_product_candidate_command("제품 후보")
+        assert action == "list"
+        assert topic is None
+
+    def test_list_english_keyword(self):
+        action, topic = _parse_product_candidate_command("product candidates")
+        assert action == "list"
+        assert topic is None
+
+    def test_promote_basic(self):
+        action, topic = _parse_product_candidate_command("제품 등록 Redis 연결 오류")
+        assert action == "promote"
+        assert topic == "Redis 연결 오류"
+
+    def test_promote_english(self):
+        action, topic = _parse_product_candidate_command("product add Login Issue")
+        assert action == "promote"
+        assert topic == "Login Issue"
+
+    def test_promote_empty_topic_returns_none(self):
+        action, topic = _parse_product_candidate_command("제품 등록")
+        assert action == "promote"
+        assert topic is None
+
+    def test_unrelated_command_returns_none(self):
+        action, topic = _parse_product_candidate_command("안녕하세요")
+        assert action == "none"
+        assert topic is None
+
+
+class TestTopicToProductKey:
+    def test_spaces_become_underscores(self):
+        assert _topic_to_product_key("Redis 연결 오류") == "redis_연결_오류"
+
+    def test_special_chars_removed(self):
+        key = _topic_to_product_key("로그인 (오류)")
+        assert "(" not in key
+        assert ")" not in key
+
+    def test_truncated_to_50(self):
+        long_topic = "가" * 60
+        assert len(_topic_to_product_key(long_topic)) <= 50
+
+    def test_empty_fallback(self):
+        assert _topic_to_product_key("!!!") == "product"

@@ -32,6 +32,8 @@ from db.repository import (
     get_notification_admins,
     add_notification_admin,
     remove_notification_admin,
+    get_topic_candidates,
+    promote_topic_to_product,
 )
 from services.classifier import classify_message, extract_topic, extract_topic_and_product, MessageCategory
 from services.context_retriever import retrieve_context, format_context_for_prompt, embed_text
@@ -53,6 +55,7 @@ from ui.message_blocks import (
     build_history_blocks,
     build_history_grouped_blocks,
     build_dashboard_blocks,
+    build_topic_candidates_blocks,
 )
 from services.summarizer import summarize_thread_context
 from utils.image_processor import analyze_slack_files
@@ -373,6 +376,106 @@ def _handle_notification_admin_command(
         logger.error(f"알림 관리자 명령 처리 오류: {e}", exc_info=True)
         post_message(client=client, channel=channel_id, thread_ts=thread_ts,
                      text=f"알림 관리자 명령 처리 중 오류가 발생했습니다: {e}")
+        return True
+    finally:
+        session.close()
+
+
+# ---------------------------------------------------------------------------
+# 제품 후보 명령 처리 (B방향 동적 발견)
+# ---------------------------------------------------------------------------
+_CANDIDATE_LIST_KEYWORDS = ("제품 후보", "product candidates", "미분류 주제")
+_CANDIDATE_PROMOTE_PREFIX = ("제품 등록", "product add")
+
+_TOPIC_KEY_RE = re.compile(r"[^\w가-힣]")
+
+
+def _topic_to_product_key(topic: str) -> str:
+    """topic 이름을 product_key 슬러그로 변환한다."""
+    key = topic.strip().lower()
+    key = re.sub(r"\s+", "_", key)
+    key = _TOPIC_KEY_RE.sub("", key)
+    return key[:50] or "product"
+
+
+def _parse_product_candidate_command(question: str) -> tuple[str, Optional[str]]:
+    """반환: ("list"|"promote"|"none", topic_or_None)"""
+    lower_q = question.strip().lower()
+    for kw in _CANDIDATE_LIST_KEYWORDS:
+        if lower_q == kw.lower() or lower_q.startswith(kw.lower() + " "):
+            return "list", None
+    for kw in _CANDIDATE_PROMOTE_PREFIX:
+        if lower_q.startswith(kw.lower()):
+            topic = question.strip()[len(kw):].strip()
+            return "promote", topic if topic else None
+    return "none", None
+
+
+def _handle_product_candidate_command(
+    client,
+    channel_id: str,
+    thread_ts: Optional[str],
+    question: str,
+    session_factory,
+) -> bool:
+    """제품 후보 조회·등록 명령을 처리한다. 처리 시 True, 아니면 False 반환."""
+    action, topic = _parse_product_candidate_command(question)
+    if action == "none":
+        return False
+
+    session = session_factory()
+    try:
+        if action == "list":
+            candidates = get_topic_candidates(session, min_count=5)
+            payload = build_topic_candidates_blocks(candidates)
+            client.chat_postMessage(
+                channel=channel_id,
+                thread_ts=thread_ts,
+                text=payload["text"],
+                blocks=payload["blocks"],
+            )
+            return True
+
+        if action == "promote":
+            if not topic:
+                post_message(
+                    client=client,
+                    channel=channel_id,
+                    thread_ts=thread_ts,
+                    text="등록할 주제명을 입력하세요. 예: `제품 등록 Redis 연결 오류`",
+                )
+                return True
+            product_key = _topic_to_product_key(topic)
+            ok = promote_topic_to_product(session, topic, product_key, topic)
+            if ok:
+                session.commit()
+                post_message(
+                    client=client,
+                    channel=channel_id,
+                    thread_ts=thread_ts,
+                    text=(
+                        f"✅ `{topic}` 을(를) 제품 `{product_key}`으로 등록했습니다.\n"
+                        f"`담당자 설정 {product_key} @담당자` 로 담당자를 지정할 수 있습니다."
+                    ),
+                )
+            else:
+                post_message(
+                    client=client,
+                    channel=channel_id,
+                    thread_ts=thread_ts,
+                    text=f"⚠️ 제품 키 `{product_key}`이 이미 존재합니다.",
+                )
+            return True
+
+        return False
+    except Exception as e:
+        logger.error(f"제품 후보 명령 처리 오류: {e}", exc_info=True)
+        post_message(
+            client=client,
+            channel=channel_id,
+            thread_ts=thread_ts,
+            text=f"제품 후보 명령 처리 중 오류가 발생했습니다: {e}",
+        )
         return True
     finally:
         session.close()
@@ -1318,6 +1421,17 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
         # ── 알림 관리자 명령 감지 ────────────────────────────────────────────
         if _handle_notification_admin_command(client, channel_id, thread_ts, question, session_factory):
             logger.info(f"알림 관리자 명령 처리 완료: user={user_id}")
+            return
+        # ────────────────────────────────────────────────────────────────────
+
+        # ── 제품 후보 명령 감지 (B방향 동적 발견) ───────────────────────────
+        if _parse_product_candidate_command(question)[0] != "none":
+            logger.info(f"제품 후보 명령 수신: user={user_id}")
+            threading.Thread(
+                target=_handle_product_candidate_command,
+                args=(client, channel_id, thread_ts, question, session_factory),
+                daemon=True,
+            ).start()
             return
         # ────────────────────────────────────────────────────────────────────
 
