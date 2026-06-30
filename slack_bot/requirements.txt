@@ -28,8 +28,9 @@ httpx>=0.26,<0.28
 tenacity==9.0.0
 pyyaml>=6.0
 
-# 이미지 처리 (첨부 이미지 압축)
+# 이미지 처리 (첨부 이미지 압축 + OCR)
 Pillow>=10.0.0
+rapidocr-onnxruntime>=1.3.0   # ONNX 기반 OCR — torch 불필요, 로그/코드 스크린샷 텍스트 추출용
 
 # 파일 형식별 텍스트 추출 (RAG용 첨부파일 처리)
 openpyxl>=3.1.0          # xlsx 파싱

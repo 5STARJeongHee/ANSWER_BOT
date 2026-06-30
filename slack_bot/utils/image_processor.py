@@ -18,18 +18,58 @@ _DOWNLOAD_TIMEOUT_SEC = 15
 # analyze_slack_files에서 사용하는 이미지 분석 상수
 _IMAGE_MIME_PREFIXES = ("image/jpeg", "image/png", "image/gif", "image/webp")
 _MAX_IMAGES = 10
+# OCR 담당: 텍스트 밀도가 높은 이미지(로그·코드·에러). Vision LLM은 비텍스트 화면을 담당.
 _IMAGE_DESCRIBE_PROMPT = (
-    "이 이미지에 보이는 텍스트를 가능한 원문 그대로 추출해줘.\n"
-    "규칙:\n"
-    "- 에러 메시지·예외 클래스명(Exception, Error 등)·URL·HTTP 상태코드·스택 트레이스는 영어 원문을 그대로 옮겨줘.\n"
-    "- 번역하거나 의역하지 마라. 보이는 텍스트를 있는 그대로 복사하는 것이 목적이다.\n"
-    "- 로그/콘솔 화면이라면 ERROR·WARN 줄을 우선적으로 추출해줘.\n"
-    "- UI 화면이라면 화면에 표시된 텍스트, 버튼명, 입력값, 상태 표시를 그대로 나열해줘.\n"
-    "- 텍스트 외에 추가 설명은 하지 않아도 된다."
+    "이 이미지가 어떤 화면인지 분석해줘.\n"
+    "1. UI/애플리케이션 화면이라면 현재 어떤 기능을 실행 중인지, 어떤 상태(오류·로딩·완료 등)인지 설명해줘.\n"
+    "2. 설정 화면이라면 주요 설정값과 현재 상태를 설명해줘.\n"
+    "3. 그래프·차트·다이어그램이라면 내용을 요약해줘.\n"
+    "서문 없이 본론부터 화면 상황을 설명해줘."
 )
+# OCR 텍스트가 이 글자 수 이상이면 텍스트 밀도가 높은 이미지로 판단, Vision LLM 호출 생략
+_OCR_TEXT_THRESHOLD = 150
 
 # CPU 서버에서 vision 호출이 대화형 QA와 경쟁하지 않도록 동시 실행 수를 제한한다.
 _vision_sem: threading.Semaphore | None = None
+
+# RapidOCR 리더 싱글턴 (첫 호출 시 초기화)
+_ocr_reader = None
+_ocr_reader_lock = threading.Lock()
+
+
+def _get_ocr_reader():
+    """RapidOCR 리더를 초기화하고 반환한다. 미설치 시 None을 반환한다."""
+    global _ocr_reader
+    if _ocr_reader is None:
+        with _ocr_reader_lock:
+            if _ocr_reader is None:
+                try:
+                    from rapidocr_onnxruntime import RapidOCR
+                    _ocr_reader = RapidOCR()
+                    logger.info("RapidOCR 리더 초기화 완료")
+                except ImportError:
+                    logger.info("rapidocr-onnxruntime 미설치 — OCR 비활성화, Vision LLM으로 폴백")
+                    _ocr_reader = False  # 재시도 방지 sentinel
+    return _ocr_reader if _ocr_reader is not False else None
+
+
+def _extract_text_by_ocr(b64_jpeg: str) -> str:
+    """b64 인코딩된 JPEG에서 RapidOCR로 텍스트를 추출한다. 실패 시 빈 문자열 반환."""
+    reader = _get_ocr_reader()
+    if reader is None:
+        return ""
+    try:
+        import numpy as np
+        image_bytes = base64.b64decode(b64_jpeg)
+        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        result, _ = reader(np.array(img))
+        if not result:
+            return ""
+        lines = [item[1] for item in result if item[2] >= 0.5]
+        return "\n".join(lines)
+    except Exception as exc:
+        logger.warning(f"OCR 텍스트 추출 실패: {exc}")
+        return ""
 
 
 def _get_vision_semaphore() -> threading.Semaphore:
@@ -112,10 +152,19 @@ def analyze_slack_files(files: list[dict], bot_token: str) -> str:
         # 세마포어는 호출마다 잡고 놓아 이미지 사이 간격에 QA 요청이 끼어들 수 있게 한다.
         count = len(images_b64)
         for i, b64 in enumerate(images_b64, 1):
+            label = f"[이미지 {i}] " if count > 1 else ""
+
+            # OCR 먼저 시도: 텍스트 밀도가 높으면(로그·코드·에러) OCR 결과 사용
+            ocr_text = _extract_text_by_ocr(b64)
+            if len(ocr_text) >= _OCR_TEXT_THRESHOLD:
+                logger.info(f"이미지 {i}/{count}: OCR 완료 ({len(ocr_text)}자)")
+                image_results.append(f"{label}{ocr_text.strip()}")
+                continue
+
+            # 텍스트 부족 → Vision LLM으로 화면 분석
             with _get_vision_semaphore():
                 part = call_vision([b64], _IMAGE_DESCRIBE_PROMPT)
             if part:
-                label = f"[이미지 {i}] " if count > 1 else ""
                 image_results.append(f"{label}{part.strip()}")
             else:
                 logger.warning(f"이미지 {i}/{count}장 분석 실패")
