@@ -10,12 +10,11 @@ from PIL import Image
 
 logger = logging.getLogger(__name__)
 
-# 텍스트 가독성을 유지하면서 토큰을 최소화하는 기준 해상도
-_MAX_SIDE_PX = 1280
 _JPEG_QUALITY = 85
 _DOWNLOAD_TIMEOUT_SEC = 15
+_MAX_SIDE_OCR_PX = 2048   # OCR: 원본 품질 최대한 유지 (스마트폰 사진도 감당 가능한 상한)
+_MAX_SIDE_VLM_PX = 1280   # Vision LLM: 토큰 절약
 
-# analyze_slack_files에서 사용하는 이미지 분석 상수
 _IMAGE_MIME_PREFIXES = ("image/jpeg", "image/png", "image/gif", "image/webp")
 _MAX_IMAGES = 10
 # OCR 담당: 텍스트 밀도가 높은 이미지(로그·코드·에러). Vision LLM은 비텍스트 화면을 담당.
@@ -53,15 +52,18 @@ def _get_ocr_reader():
     return _ocr_reader if _ocr_reader is not False else None
 
 
-def _extract_text_by_ocr(b64_jpeg: str) -> str:
-    """b64 인코딩된 JPEG에서 RapidOCR로 텍스트를 추출한다. 실패 시 빈 문자열 반환."""
+def _extract_text_by_ocr(image_bytes: bytes) -> str:
+    """이미지 bytes에서 RapidOCR로 텍스트를 추출한다. 실패 시 빈 문자열 반환.
+
+    OCR 전용 해상도(_MAX_SIDE_OCR_PX)로 축소하여 원본 품질을 최대한 유지한다.
+    """
     reader = _get_ocr_reader()
     if reader is None:
         return ""
     try:
         import numpy as np
-        image_bytes = base64.b64decode(b64_jpeg)
         img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        img = _resize_if_needed(img, _MAX_SIDE_OCR_PX)
         result, _ = reader(np.array(img))
         if not result:
             return ""
@@ -80,11 +82,8 @@ def _get_vision_semaphore() -> threading.Semaphore:
     return _vision_sem
 
 
-def download_and_compress(url: str, bot_token: str) -> str | None:
-    """
-    Slack 비공개 이미지 URL을 다운로드하고 압축된 JPEG의 base64 문자열을 반환한다.
-    실패 시 None을 반환한다.
-    """
+def _download_raw(url: str, bot_token: str) -> bytes | None:
+    """Slack 비공개 이미지 URL을 원본 bytes로 다운로드한다. 실패 시 None."""
     try:
         resp = requests.get(
             url,
@@ -105,16 +104,19 @@ def download_and_compress(url: str, bot_token: str) -> str | None:
         )
         return None
 
+    return resp.content
+
+
+def _compress_to_b64(raw_bytes: bytes, max_side: int) -> str | None:
+    """원본 이미지 bytes를 max_side 이하로 축소하여 JPEG b64 문자열로 반환한다. 실패 시 None."""
     try:
-        img = Image.open(io.BytesIO(resp.content)).convert("RGB")
+        img = Image.open(io.BytesIO(raw_bytes)).convert("RGB")
         original_size = img.size
-        img = _resize_if_needed(img)
+        img = _resize_if_needed(img, max_side)
         buf = io.BytesIO()
         img.save(buf, format="JPEG", quality=_JPEG_QUALITY, optimize=True)
         compressed_kb = len(buf.getvalue()) // 1024
-        logger.info(
-            f"이미지 압축 완료: {original_size} → {img.size} / {compressed_kb}KB"
-        )
+        logger.info(f"이미지 압축 완료: {original_size} → {img.size} / {compressed_kb}KB")
         return base64.b64encode(buf.getvalue()).decode()
     except Exception as exc:
         logger.warning(f"이미지 압축 실패: {exc}")
@@ -130,10 +132,10 @@ def analyze_slack_files(files: list[dict], bot_token: str) -> str:
     from services.llm_service import call_vision
     from utils.file_processor import extract_file_texts
 
-    # ── 이미지: vision 모델로 분석 ──────────────────────────────────────────
-    images_b64: list[str] = []
+    # ── 이미지 다운로드 (원본 bytes 보관) ───────────────────────────────────
+    raw_images: list[bytes] = []
     for f in files:
-        if len(images_b64) >= _MAX_IMAGES:
+        if len(raw_images) >= _MAX_IMAGES:
             break
         mime = f.get("mimetype", "")
         if not any(mime.startswith(p) for p in _IMAGE_MIME_PREFIXES):
@@ -141,31 +143,42 @@ def analyze_slack_files(files: list[dict], bot_token: str) -> str:
         url = f.get("url_private_download") or f.get("url_private")
         if not url:
             continue
-        b64 = download_and_compress(url, bot_token)
-        if b64:
-            images_b64.append(b64)
+        raw = _download_raw(url, bot_token)
+        if raw:
+            raw_images.append(raw)
 
     image_results: list[str] = []
-    if images_b64:
-        # 이미지를 1장씩 개별 호출한다.
-        # 여러 장을 묶으면 n_prompt_tokens이 4096을 초과하므로 반드시 분리한다.
-        # 세마포어는 호출마다 잡고 놓아 이미지 사이 간격에 QA 요청이 끼어들 수 있게 한다.
-        count = len(images_b64)
-        for i, b64 in enumerate(images_b64, 1):
+    if raw_images:
+        # 이미지를 1장씩 처리한다.
+        # Vision LLM 호출 시 세마포어로 QA 요청과 경쟁을 조율한다.
+        count = len(raw_images)
+        for i, raw in enumerate(raw_images, 1):
             label = f"[이미지 {i}] " if count > 1 else ""
 
-            # OCR 먼저 시도: 텍스트 밀도가 높으면(로그·코드·에러) OCR 결과 사용
-            ocr_text = _extract_text_by_ocr(b64)
+            # OCR 먼저 시도: 2048px 이하 원본 품질로 텍스트 추출
+            ocr_text = _extract_text_by_ocr(raw)
             if len(ocr_text) >= _OCR_TEXT_THRESHOLD:
                 logger.info(f"이미지 {i}/{count}: OCR 완료 ({len(ocr_text)}자)")
                 image_results.append(f"{label}{ocr_text.strip()}")
                 continue
 
-            # 텍스트 부족 → Vision LLM으로 화면 분석
+            # OCR 텍스트 부족 → Vision LLM으로 화면 분석 (1280px 압축)
+            b64 = _compress_to_b64(raw, _MAX_SIDE_VLM_PX)
+            if b64 is None:
+                logger.warning(f"이미지 {i}/{count}: 압축 실패")
+                continue
+
             with _get_vision_semaphore():
                 part = call_vision([b64], _IMAGE_DESCRIBE_PROMPT)
+
             if part:
-                image_results.append(f"{label}{part.strip()}")
+                # OCR에서 부분 추출된 텍스트가 있으면 Vision LLM 결과에 보완
+                if ocr_text.strip():
+                    image_results.append(
+                        f"{label}{part.strip()}\n[화면 내 텍스트: {ocr_text.strip()}]"
+                    )
+                else:
+                    image_results.append(f"{label}{part.strip()}")
             else:
                 logger.warning(f"이미지 {i}/{count}장 분석 실패")
 
@@ -185,15 +198,15 @@ def analyze_slack_files(files: list[dict], bot_token: str) -> str:
     return "\n\n".join(parts) if parts else ""
 
 
-def _resize_if_needed(img: Image.Image) -> Image.Image:
-    """긴 쪽이 _MAX_SIDE_PX를 초과하면 비율을 유지하며 축소한다."""
+def _resize_if_needed(img: Image.Image, max_side: int) -> Image.Image:
+    """긴 쪽이 max_side를 초과하면 비율을 유지하며 축소한다."""
     w, h = img.size
-    if max(w, h) <= _MAX_SIDE_PX:
+    if max(w, h) <= max_side:
         return img
     if w >= h:
-        new_w = _MAX_SIDE_PX
-        new_h = int(h * _MAX_SIDE_PX / w)
+        new_w = max_side
+        new_h = int(h * max_side / w)
     else:
-        new_h = _MAX_SIDE_PX
-        new_w = int(w * _MAX_SIDE_PX / h)
+        new_h = max_side
+        new_w = int(w * max_side / h)
     return img.resize((new_w, new_h), Image.LANCZOS)
