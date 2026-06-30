@@ -76,7 +76,7 @@ def main() -> None:
     _vote_action_map = {action_id: value for action_id, value, _ in _VOTE_BUTTONS}
 
     def _make_vote_handler(reason_value: str):
-        def handle_feedback_vote(ack, body, client, action) -> None:
+        def handle_feedback_vote(ack, body, action, respond) -> None:
             ack()
             voter_id: str = body["user"]["id"]
             original_ts: str = action.get("value", "")
@@ -103,14 +103,21 @@ def main() -> None:
                 session.close()
 
             try:
-                client.chat_update(
-                    channel=channel,
-                    ts=body["message"]["ts"],
+                respond(
+                    replace_original=True,
                     text="소중한 피드백 감사합니다.",
-                    blocks=[],
+                    blocks=[
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": "✅ 소중한 피드백 감사합니다. 더 좋은 품질의 응답에 도움이 됩니다.",
+                            },
+                        }
+                    ],
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning(f"피드백 메시지 업데이트 실패: {exc}")
         return handle_feedback_vote
 
     for _action_id, _reason_value, _ in _VOTE_BUTTONS:
