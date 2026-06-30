@@ -1,0 +1,22 @@
+# SearXNG 설정 — 슬랙 봇 내부 전용 인스턴스 (외부 공개 아님)
+use_default_settings: true
+
+server:
+  limiter: false
+  image_proxy: false
+
+search:
+  formats:
+    - html
+    - json
+  default_lang: ko-KR
+
+engines:
+  - name: google
+    disabled: false
+  - name: bing
+    disabled: false
+  - name: duckduckgo
+    disabled: false
+  - name: naver
+    disabled: false

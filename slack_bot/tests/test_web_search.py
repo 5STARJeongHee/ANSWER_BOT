@@ -1,4 +1,4 @@
-﻿# web_search 서비스 단위 테스트 — DuckDuckGo 실제 호출 없이 검증
+﻿# web_search 서비스 단위 테스트 — DuckDuckGo / SearXNG 실제 호출 없이 검증
 import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -12,11 +12,16 @@ import pytest
 
 import services.web_search as ws
 
+from unittest.mock import patch as _patch
+
+import httpx
+
 from services.web_search import (
     should_search,
     search_web,
     format_web_search_for_prompt,
     SearchResult,
+    SearXNGProvider,
 )
 
 
@@ -109,4 +114,68 @@ class TestSearchWeb:
             result = search_web("[첨부 이미지 분석]\n오류", provider=provider)
         assert "A" * 200 in result
         assert "A" * 201 not in result
+
+
+class TestSearXNGProvider:
+    def _mock_response(self, data: dict, status_code: int = 200):
+        mock = MagicMock()
+        mock.status_code = status_code
+        mock.json.return_value = data
+        mock.raise_for_status = MagicMock(
+            side_effect=httpx.HTTPStatusError("err", request=MagicMock(), response=mock)
+            if status_code >= 400 else None
+        )
+        return mock
+
+    def test_returns_results_on_success(self):
+        payload = {
+            "results": [
+                {"title": "제목1", "content": "내용1", "url": "https://a.com"},
+                {"title": "제목2", "content": "내용2", "url": "https://b.com"},
+            ]
+        }
+        provider = SearXNGProvider("http://searxng:8080")
+        with _patch("httpx.get", return_value=self._mock_response(payload)):
+            results = provider.search("테스트", top_k=3, timeout=4.0)
+        assert len(results) == 2
+        assert results[0].title == "제목1"
+        assert results[0].body == "내용1"
+        assert results[0].url == "https://a.com"
+
+    def test_respects_top_k(self):
+        payload = {
+            "results": [
+                {"title": f"제목{i}", "content": f"내용{i}", "url": f"https://x{i}.com"}
+                for i in range(5)
+            ]
+        }
+        provider = SearXNGProvider("http://searxng:8080")
+        with _patch("httpx.get", return_value=self._mock_response(payload)):
+            results = provider.search("테스트", top_k=2, timeout=4.0)
+        assert len(results) == 2
+
+    def test_returns_empty_on_timeout(self):
+        provider = SearXNGProvider("http://searxng:8080")
+        with _patch("httpx.get", side_effect=httpx.TimeoutException("timeout")):
+            results = provider.search("테스트", top_k=3, timeout=4.0)
+        assert results == []
+
+    def test_returns_empty_on_connection_error(self):
+        provider = SearXNGProvider("http://searxng:8080")
+        with _patch("httpx.get", side_effect=Exception("connection refused")):
+            results = provider.search("테스트", top_k=3, timeout=4.0)
+        assert results == []
+
+    def test_skips_result_without_content(self):
+        payload = {
+            "results": [
+                {"title": "제목", "content": "", "url": "https://a.com"},
+                {"title": "제목2", "content": "내용2", "url": "https://b.com"},
+            ]
+        }
+        provider = SearXNGProvider("http://searxng:8080")
+        with _patch("httpx.get", return_value=self._mock_response(payload)):
+            results = provider.search("테스트", top_k=3, timeout=4.0)
+        assert len(results) == 1
+        assert results[0].title == "제목2"
 

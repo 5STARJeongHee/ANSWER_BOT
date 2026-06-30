@@ -179,11 +179,66 @@ class DuckDuckGoProvider:
 
 
 # ---------------------------------------------------------------------------
+# SearXNG Provider (Docker 내부 자체 호스팅 메타 검색 엔진)
+# ---------------------------------------------------------------------------
+
+class SearXNGProvider:
+    """
+    자체 호스팅 SearXNG 인스턴스를 호출한다.
+    GET /search?q=...&format=json 으로 결과를 JSON으로 받는다.
+    SearXNG 미가동 시 빈 리스트를 반환해 DuckDuckGo fallback으로 이어진다.
+    """
+
+    def __init__(self, base_url: str) -> None:
+        self._base_url = base_url.rstrip("/")
+
+    def search(self, query: str, top_k: int, timeout: float) -> list[SearchResult]:
+        try:
+            response = httpx.get(
+                f"{self._base_url}/search",
+                params={"q": query, "format": "json", "language": "ko-KR"},
+                timeout=timeout,
+            )
+            response.raise_for_status()
+        except httpx.TimeoutException:
+            logger.warning(f"SearXNG 타임아웃 (쿼리={query!r:.50}, timeout={timeout}s)")
+            return []
+        except httpx.HTTPStatusError as exc:
+            logger.warning(f"SearXNG HTTP 오류: {exc.response.status_code}")
+            return []
+        except Exception as exc:
+            logger.warning(f"SearXNG 검색 실패: {exc}")
+            return []
+
+        results: list[SearchResult] = []
+        for item in response.json().get("results", []):
+            if len(results) >= top_k:
+                break
+            title = item.get("title", "").strip()
+            body = item.get("content", "").strip()
+            url = item.get("url", "").strip()
+            if title and body:
+                results.append(SearchResult(title=title, body=body, url=url))
+
+        logger.debug(f"SearXNG 검색 완료: {len(results)}건 (쿼리={query!r:.50})")
+        return results
+
+
+# ---------------------------------------------------------------------------
 # 공개 인터페이스
 # ---------------------------------------------------------------------------
 
+def _build_default_provider() -> SearchProvider:
+    """설정에 따라 기본 provider를 선택한다. SearXNG 우선, 미설정 시 DuckDuckGo."""
+    if config.SEARCH_PROVIDER == "searxng" and config.SEARXNG_URL:
+        logger.info(f"웹 검색 provider: SearXNG ({config.SEARXNG_URL})")
+        return SearXNGProvider(config.SEARXNG_URL)
+    logger.info("웹 검색 provider: DuckDuckGo (fallback)")
+    return DuckDuckGoProvider()
+
+
 # 기본 provider 인스턴스 (모듈 로딩 시 1회 생성)
-_default_provider: SearchProvider = DuckDuckGoProvider()
+_default_provider: SearchProvider = _build_default_provider()
 
 
 def search_web(question: str, provider: Optional[SearchProvider] = None) -> str:
