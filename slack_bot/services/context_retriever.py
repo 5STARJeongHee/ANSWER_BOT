@@ -83,14 +83,21 @@ def _generate_rag_query(question: str, thread_summary: Optional[str] = None) -> 
     질문(과 필요시 스레드 요약)에서 핵심 키워드와 의도를 추출하여
     과거 대화 검색에 사용할 검색 쿼리 문장을 1개 생성한다.
     """
+    # [첨부 이미지 분석] 블록은 쿼리 생성에서 제외.
+    # effective_question 형식: "[첨부 이미지 분석]\n{OCR텍스트}\n\n{원래질문}"
+    # OCR 대량 텍스트를 소형 LLM에 넘기면 엉뚱한 쿼리가 생성된다.
+    query_base = question
+    if "[첨부 이미지 분석]" in question and "\n\n" in question:
+        query_base = question[question.rfind("\n\n") + 2:].strip() or question
+
     system_content = (
         "다음 질문에서 핵심 키워드와 의도를 추출하여 "
         "과거 대화 검색에 사용할 검색 쿼리 문장을 1개 생성하라. "
         "한국어로 출력하고 쿼리만 반환한다."
     )
-    user_content = f"질문: {question}"
+    user_content = f"질문: {query_base}"
     if thread_summary:
-        user_content = f"[스레드 이전 문맥]\n{thread_summary}\n\n질문: {question}"
+        user_content = f"[스레드 이전 문맥]\n{thread_summary}\n\n질문: {query_base}"
 
     messages = [
         {"role": "system", "content": system_content},

@@ -179,7 +179,8 @@ class TestAnalyzeSlackFilesOcrRouting:
         long_text = "ERROR: Connection refused\n" * 10
         assert len(long_text) >= _OCR_TEXT_THRESHOLD
 
-        with patch("utils.image_processor._download_raw", return_value=_FAKE_RAW), \
+        with patch.dict(sys.modules, {"services.llm_service": _llm_stub}), \
+             patch("utils.image_processor._download_raw", return_value=_FAKE_RAW), \
              patch("utils.image_processor._extract_text_by_ocr", return_value=long_text), \
              patch.object(_llm_stub, "call_vision") as mock_cv:
             result = analyze_slack_files([_image_file()], "tok")
@@ -191,7 +192,8 @@ class TestAnalyzeSlackFilesOcrRouting:
         """OCR 텍스트가 임계값 미만이면 Vision LLM을 호출하고 그 결과를 반환한다."""
         short_text = ""
 
-        with patch("utils.image_processor._download_raw", return_value=_FAKE_RAW), \
+        with patch.dict(sys.modules, {"services.llm_service": _llm_stub}), \
+             patch("utils.image_processor._download_raw", return_value=_FAKE_RAW), \
              patch("utils.image_processor._extract_text_by_ocr", return_value=short_text), \
              patch("utils.image_processor._compress_to_b64", return_value=_FAKE_B64), \
              patch.object(_llm_stub, "call_vision", return_value="로그인 화면: 오류 상태") as mock_cv:
@@ -204,7 +206,8 @@ class TestAnalyzeSlackFilesOcrRouting:
         """OCR이 부분 텍스트를 찾았을 때(임계값 미만) Vision LLM 결과에 보완으로 포함한다."""
         partial_text = "NullPointerException"  # 짧지만 의미 있는 텍스트
 
-        with patch("utils.image_processor._download_raw", return_value=_FAKE_RAW), \
+        with patch.dict(sys.modules, {"services.llm_service": _llm_stub}), \
+             patch("utils.image_processor._download_raw", return_value=_FAKE_RAW), \
              patch("utils.image_processor._extract_text_by_ocr", return_value=partial_text), \
              patch("utils.image_processor._compress_to_b64", return_value=_FAKE_B64), \
              patch.object(_llm_stub, "call_vision", return_value="오류 다이얼로그 화면"):
@@ -215,7 +218,8 @@ class TestAnalyzeSlackFilesOcrRouting:
 
     def test_vision_compress_uses_vlm_resolution(self):
         """Vision LLM 경로에서 _MAX_SIDE_VLM_PX 해상도로 압축한다."""
-        with patch("utils.image_processor._download_raw", return_value=_FAKE_RAW), \
+        with patch.dict(sys.modules, {"services.llm_service": _llm_stub}), \
+             patch("utils.image_processor._download_raw", return_value=_FAKE_RAW), \
              patch("utils.image_processor._extract_text_by_ocr", return_value=""), \
              patch("utils.image_processor._compress_to_b64", return_value=_FAKE_B64) as mock_compress, \
              patch.object(_llm_stub, "call_vision", return_value="화면 분석"):
@@ -236,7 +240,8 @@ class TestAnalyzeSlackFilesOcrRouting:
         """여러 이미지: 첫 번째는 OCR(텍스트 충분), 두 번째는 Vision LLM(텍스트 부족)."""
         ocr_texts = ["a" * 200, ""]
 
-        with patch("utils.image_processor._download_raw", return_value=_FAKE_RAW), \
+        with patch.dict(sys.modules, {"services.llm_service": _llm_stub}), \
+             patch("utils.image_processor._download_raw", return_value=_FAKE_RAW), \
              patch("utils.image_processor._extract_text_by_ocr", side_effect=ocr_texts), \
              patch("utils.image_processor._compress_to_b64", return_value=_FAKE_B64), \
              patch.object(_llm_stub, "call_vision", return_value="Vision 결과") as mock_cv:
@@ -247,7 +252,8 @@ class TestAnalyzeSlackFilesOcrRouting:
 
     def test_download_failure_skips_image(self):
         """이미지 다운로드 실패 시 해당 이미지를 건너뛴다."""
-        with patch("utils.image_processor._download_raw", return_value=None), \
+        with patch.dict(sys.modules, {"services.llm_service": _llm_stub}), \
+             patch("utils.image_processor._download_raw", return_value=None), \
              patch.object(_llm_stub, "call_vision") as mock_cv:
             result = analyze_slack_files([_image_file()], "tok")
 
@@ -256,7 +262,8 @@ class TestAnalyzeSlackFilesOcrRouting:
 
     def test_compress_failure_skips_vision(self):
         """VLM 압축 실패 시 해당 이미지를 건너뛴다."""
-        with patch("utils.image_processor._download_raw", return_value=_FAKE_RAW), \
+        with patch.dict(sys.modules, {"services.llm_service": _llm_stub}), \
+             patch("utils.image_processor._download_raw", return_value=_FAKE_RAW), \
              patch("utils.image_processor._extract_text_by_ocr", return_value=""), \
              patch("utils.image_processor._compress_to_b64", return_value=None), \
              patch.object(_llm_stub, "call_vision") as mock_cv:
