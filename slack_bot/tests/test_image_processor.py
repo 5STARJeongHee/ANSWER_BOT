@@ -36,7 +36,12 @@ from utils.image_processor import (
     analyze_slack_files,
     _extract_text_by_ocr,
     _OCR_TEXT_THRESHOLD,
+    _MAX_SIDE_OCR_PX,
+    _MAX_SIDE_VLM_PX,
 )
+
+_FAKE_RAW = b"fake_jpeg_bytes"
+_FAKE_B64 = "ZmFrZV9qcGVnX2J5dGVz"  # base64("fake_jpeg_bytes")
 
 
 @pytest.fixture(autouse=True)
@@ -86,7 +91,7 @@ class TestGetOcrReader:
 class TestExtractTextByOcr:
     def test_returns_empty_when_reader_unavailable(self):
         with patch("utils.image_processor._get_ocr_reader", return_value=None):
-            result = _extract_text_by_ocr("anyfakeb64==")
+            result = _extract_text_by_ocr(_FAKE_RAW)
         assert result == ""
 
     def test_returns_joined_text_above_confidence(self):
@@ -100,9 +105,6 @@ class TestExtractTextByOcr:
             ],
             0.01,
         )
-        import base64
-        fake_b64 = base64.b64encode(b"fake_jpeg_bytes").decode()
-
         mock_img = MagicMock()
         mock_img.convert.return_value = mock_img
         mock_np = MagicMock()
@@ -110,49 +112,61 @@ class TestExtractTextByOcr:
 
         with patch("utils.image_processor._get_ocr_reader", return_value=mock_reader), \
              patch("utils.image_processor.Image") as mock_pil, \
-             patch("utils.image_processor.base64") as mock_b64, \
+             patch("utils.image_processor._resize_if_needed", return_value=mock_img), \
              patch.dict(sys.modules, {"numpy": mock_np}):
-            mock_b64.b64decode.return_value = b"fake"
             mock_pil.open.return_value = mock_img
-            result = _extract_text_by_ocr(fake_b64)
+            result = _extract_text_by_ocr(_FAKE_RAW)
 
         assert "ERROR: Connection refused" in result
         assert "at com.example.Main.run" in result
         assert "low_conf_noise" not in result
 
-    def test_returns_empty_when_ocr_result_is_none(self):
+    def test_uses_ocr_resolution_for_resize(self):
+        """OCR 전에 _MAX_SIDE_OCR_PX 기준으로 축소한다."""
         mock_reader = MagicMock()
-        mock_reader.return_value = (None, 0.0)
-
-        mock_np = MagicMock()
+        mock_reader.return_value = ([], 0.0)
         mock_img = MagicMock()
         mock_img.convert.return_value = mock_img
+        mock_np = MagicMock()
 
         with patch("utils.image_processor._get_ocr_reader", return_value=mock_reader), \
              patch("utils.image_processor.Image") as mock_pil, \
-             patch("utils.image_processor.base64") as mock_b64, \
+             patch("utils.image_processor._resize_if_needed", return_value=mock_img) as mock_resize, \
              patch.dict(sys.modules, {"numpy": mock_np}):
-            mock_b64.b64decode.return_value = b"fake"
             mock_pil.open.return_value = mock_img
-            result = _extract_text_by_ocr("fakeb64==")
+            _extract_text_by_ocr(_FAKE_RAW)
+
+        mock_resize.assert_called_once_with(mock_img, _MAX_SIDE_OCR_PX)
+
+    def test_returns_empty_when_ocr_result_is_none(self):
+        mock_reader = MagicMock()
+        mock_reader.return_value = (None, 0.0)
+        mock_img = MagicMock()
+        mock_img.convert.return_value = mock_img
+        mock_np = MagicMock()
+
+        with patch("utils.image_processor._get_ocr_reader", return_value=mock_reader), \
+             patch("utils.image_processor.Image") as mock_pil, \
+             patch("utils.image_processor._resize_if_needed", return_value=mock_img), \
+             patch.dict(sys.modules, {"numpy": mock_np}):
+            mock_pil.open.return_value = mock_img
+            result = _extract_text_by_ocr(_FAKE_RAW)
 
         assert result == ""
 
     def test_returns_empty_on_exception(self):
         mock_reader = MagicMock()
         mock_reader.side_effect = RuntimeError("OCR 내부 오류")
-
-        mock_np = MagicMock()
         mock_img = MagicMock()
         mock_img.convert.return_value = mock_img
+        mock_np = MagicMock()
 
         with patch("utils.image_processor._get_ocr_reader", return_value=mock_reader), \
              patch("utils.image_processor.Image") as mock_pil, \
-             patch("utils.image_processor.base64") as mock_b64, \
+             patch("utils.image_processor._resize_if_needed", return_value=mock_img), \
              patch.dict(sys.modules, {"numpy": mock_np}):
-            mock_b64.b64decode.return_value = b"fake"
             mock_pil.open.return_value = mock_img
-            result = _extract_text_by_ocr("fakeb64==")
+            result = _extract_text_by_ocr(_FAKE_RAW)
 
         assert result == ""
 
@@ -165,55 +179,67 @@ class TestAnalyzeSlackFilesOcrRouting:
         long_text = "ERROR: Connection refused\n" * 10
         assert len(long_text) >= _OCR_TEXT_THRESHOLD
 
-        _llm_stub.call_vision.reset_mock()
-        with patch("utils.image_processor.download_and_compress", return_value="fakeb64"), \
-             patch("utils.image_processor._extract_text_by_ocr", return_value=long_text):
+        with patch("utils.image_processor._download_raw", return_value=_FAKE_RAW), \
+             patch("utils.image_processor._extract_text_by_ocr", return_value=long_text), \
+             patch.object(_llm_stub, "call_vision") as mock_cv:
             result = analyze_slack_files([_image_file()], "tok")
 
-        _llm_stub.call_vision.assert_not_called()
+        mock_cv.assert_not_called()
         assert "Connection refused" in result
 
     def test_delegates_to_vision_when_ocr_text_insufficient(self):
-        """OCR 텍스트가 임계값 미만이면 Vision LLM을 호출한다."""
-        short_text = "짧음"
-        assert len(short_text) < _OCR_TEXT_THRESHOLD
+        """OCR 텍스트가 임계값 미만이면 Vision LLM을 호출하고 그 결과를 반환한다."""
+        short_text = ""
 
-        with patch("utils.image_processor.download_and_compress", return_value="fakeb64"), \
+        with patch("utils.image_processor._download_raw", return_value=_FAKE_RAW), \
              patch("utils.image_processor._extract_text_by_ocr", return_value=short_text), \
-             patch("services.llm_service.call_vision", return_value="로그인 화면: 오류 상태") as mock_cv:
+             patch("utils.image_processor._compress_to_b64", return_value=_FAKE_B64), \
+             patch.object(_llm_stub, "call_vision", return_value="로그인 화면: 오류 상태") as mock_cv:
             result = analyze_slack_files([_image_file()], "tok")
 
         mock_cv.assert_called_once()
         assert "로그인 화면" in result
 
-    def test_delegates_to_vision_when_ocr_unavailable(self):
-        """OCR 미설치(빈 문자열 반환) 시 Vision LLM으로 폴백한다."""
-        with patch("utils.image_processor.download_and_compress", return_value="fakeb64"), \
-             patch("utils.image_processor._extract_text_by_ocr", return_value=""), \
-             patch("services.llm_service.call_vision", return_value="화면 분석 완료") as mock_cv:
+    def test_partial_ocr_text_appended_to_vision_result(self):
+        """OCR이 부분 텍스트를 찾았을 때(임계값 미만) Vision LLM 결과에 보완으로 포함한다."""
+        partial_text = "NullPointerException"  # 짧지만 의미 있는 텍스트
+
+        with patch("utils.image_processor._download_raw", return_value=_FAKE_RAW), \
+             patch("utils.image_processor._extract_text_by_ocr", return_value=partial_text), \
+             patch("utils.image_processor._compress_to_b64", return_value=_FAKE_B64), \
+             patch.object(_llm_stub, "call_vision", return_value="오류 다이얼로그 화면"):
             result = analyze_slack_files([_image_file()], "tok")
 
-        mock_cv.assert_called_once()
-        assert "화면 분석 완료" in result
+        assert "오류 다이얼로그 화면" in result
+        assert "NullPointerException" in result
+
+    def test_vision_compress_uses_vlm_resolution(self):
+        """Vision LLM 경로에서 _MAX_SIDE_VLM_PX 해상도로 압축한다."""
+        with patch("utils.image_processor._download_raw", return_value=_FAKE_RAW), \
+             patch("utils.image_processor._extract_text_by_ocr", return_value=""), \
+             patch("utils.image_processor._compress_to_b64", return_value=_FAKE_B64) as mock_compress, \
+             patch.object(_llm_stub, "call_vision", return_value="화면 분석"):
+            analyze_slack_files([_image_file()], "tok")
+
+        mock_compress.assert_called_once_with(_FAKE_RAW, _MAX_SIDE_VLM_PX)
 
     def test_skips_non_image_files(self):
         """이미지가 아닌 파일은 Vision LLM과 OCR 모두 건너뛴다."""
-        _llm_stub.call_vision.reset_mock()
         non_image = {"mimetype": "application/pdf", "url_private": "https://example.com/doc.pdf"}
 
-        with patch("utils.image_processor.download_and_compress") as mock_dl:
+        with patch("utils.image_processor._download_raw") as mock_dl:
             analyze_slack_files([non_image], "tok")
 
         mock_dl.assert_not_called()
-        _llm_stub.call_vision.assert_not_called()
 
     def test_multiple_images_ocr_first_vision_fallback(self):
         """여러 이미지: 첫 번째는 OCR(텍스트 충분), 두 번째는 Vision LLM(텍스트 부족)."""
         ocr_texts = ["a" * 200, ""]
 
-        with patch("utils.image_processor.download_and_compress", return_value="fakeb64"), \
+        with patch("utils.image_processor._download_raw", return_value=_FAKE_RAW), \
              patch("utils.image_processor._extract_text_by_ocr", side_effect=ocr_texts), \
-             patch("services.llm_service.call_vision", return_value="Vision 결과") as mock_cv:
+             patch("utils.image_processor._compress_to_b64", return_value=_FAKE_B64), \
+             patch.object(_llm_stub, "call_vision", return_value="Vision 결과") as mock_cv:
             result = analyze_slack_files([_image_file(), _image_file()], "tok")
 
         mock_cv.assert_called_once()
@@ -221,10 +247,20 @@ class TestAnalyzeSlackFilesOcrRouting:
 
     def test_download_failure_skips_image(self):
         """이미지 다운로드 실패 시 해당 이미지를 건너뛴다."""
-        _llm_stub.call_vision.reset_mock()
-
-        with patch("utils.image_processor.download_and_compress", return_value=None):
+        with patch("utils.image_processor._download_raw", return_value=None), \
+             patch.object(_llm_stub, "call_vision") as mock_cv:
             result = analyze_slack_files([_image_file()], "tok")
 
-        _llm_stub.call_vision.assert_not_called()
+        mock_cv.assert_not_called()
+        assert result == ""
+
+    def test_compress_failure_skips_vision(self):
+        """VLM 압축 실패 시 해당 이미지를 건너뛴다."""
+        with patch("utils.image_processor._download_raw", return_value=_FAKE_RAW), \
+             patch("utils.image_processor._extract_text_by_ocr", return_value=""), \
+             patch("utils.image_processor._compress_to_b64", return_value=None), \
+             patch.object(_llm_stub, "call_vision") as mock_cv:
+            result = analyze_slack_files([_image_file()], "tok")
+
+        mock_cv.assert_not_called()
         assert result == ""
