@@ -110,10 +110,10 @@ class TestSearchWeb:
         provider = self._make_provider([
             SearchResult(title="제목", body=long_body, url="https://example.com"),
         ])
-        with _web_search_config(WEB_SEARCH_MAX_CHARS=200):
+        with _web_search_config(WEB_SEARCH_MAX_CHARS=300):
             result = search_web("[첨부 이미지 분석]\n오류", provider=provider)
-        assert "A" * 200 in result
-        assert "A" * 201 not in result
+        assert "A" * 300 in result
+        assert "A" * 301 not in result
 
 
 class TestSearXNGProvider:

@@ -170,7 +170,7 @@ WEB_SEARCH_TIMEOUT: float = float(os.getenv("WEB_SEARCH_TIMEOUT", "4.0"))
 # 검색 결과 최대 개수
 WEB_SEARCH_TOP_K: int = int(os.getenv("WEB_SEARCH_TOP_K", "3"))
 # 검색 결과 1건당 최대 문자 수
-WEB_SEARCH_MAX_CHARS: int = int(os.getenv("WEB_SEARCH_MAX_CHARS", "200"))
+WEB_SEARCH_MAX_CHARS: int = int(os.getenv("WEB_SEARCH_MAX_CHARS", "300"))
 # 검색 provider: searxng (기본, Docker 내부 서비스) 또는 duckduckgo (fallback)
 SEARCH_PROVIDER: str = os.getenv("SEARCH_PROVIDER", "searxng")
 SEARXNG_URL: str = os.getenv("SEARXNG_URL", "http://searxng:8080")
