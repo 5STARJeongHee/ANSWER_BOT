@@ -2,8 +2,11 @@
 FROM python:3.11-slim
 
 # fastembed ONNX 런타임이 요구하는 libgomp (OpenMP)
+# libgl1: opencv-python이 요구하는 libGL.so.1 제공 (rapidocr-onnxruntime 의존성)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgomp1 \
+    libgl1 \
+    libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
