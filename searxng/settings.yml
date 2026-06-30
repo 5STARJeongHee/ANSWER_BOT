@@ -2,6 +2,7 @@
 use_default_settings: true
 
 server:
+  secret_key: "slackbot-searxng-internal-2026"
   limiter: false
   image_proxy: false
 
