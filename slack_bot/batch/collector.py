@@ -12,7 +12,7 @@ from slack_sdk import WebClient
 import config
 from db.repository import upsert_message, save_embedding, get_oldest_message_ts
 from services.context_retriever import embed_text
-from utils.image_processor import analyze_slack_files
+from utils.image_processor import analyze_slack_files, merge_attachments_to_text
 from utils.pii_filter import apply_pii_filter
 
 logger = logging.getLogger(__name__)
@@ -52,7 +52,7 @@ def _enrich_with_images(msg: dict, bot_token: str) -> str:
     files = msg.get("files") or []
     if not files:
         return raw_text
-    image_ctx = analyze_slack_files(files, bot_token)
+    image_ctx = merge_attachments_to_text(analyze_slack_files(files, bot_token))
     if not image_ctx:
         return raw_text
     if raw_text.strip():

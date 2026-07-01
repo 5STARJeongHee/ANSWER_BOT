@@ -59,6 +59,9 @@ class ConversationMessage(Base):
     embeddings = relationship(
         "ContextEmbedding", back_populates="source_message", cascade="all, delete-orphan"
     )
+    attachments = relationship(
+        "MessageAttachment", back_populates="message", cascade="all, delete-orphan"
+    )
 
     def __repr__(self) -> str:
         return (
@@ -168,6 +171,34 @@ class ContextSummary(Base):
         return (
             f"<ContextSummary id={self.id} channel={self.channel_id} "
             f"{self.period_start}~{self.period_end}>"
+        )
+
+
+class MessageAttachment(Base):
+    """메시지에 첨부된 파일의 분석 결과를 파일별로 저장하는 테이블."""
+
+    __tablename__ = "message_attachment"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    message_id = Column(
+        BigInteger,
+        ForeignKey("conversation_message.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    slack_file_id = Column(String(50), nullable=True)
+    file_name = Column(String(255), nullable=True)
+    mime_type = Column(String(100), nullable=True)
+    file_type = Column(String(20), nullable=False)  # image|text|xlsx|docx|pdf|video|other
+    analysis_text = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    message = relationship("ConversationMessage", back_populates="attachments")
+
+    def __repr__(self) -> str:
+        return (
+            f"<MessageAttachment id={self.id} message_id={self.message_id} "
+            f"file_type={self.file_type!r} name={self.file_name!r}>"
         )
 
 

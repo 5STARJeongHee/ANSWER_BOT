@@ -8,6 +8,8 @@ import threading
 import requests
 from PIL import Image
 
+from utils.attachment_result import AttachmentResult
+
 logger = logging.getLogger(__name__)
 
 _JPEG_QUALITY = 85
@@ -123,19 +125,24 @@ def _compress_to_b64(raw_bytes: bytes, max_side: int) -> str | None:
         return None
 
 
-def analyze_slack_files(files: list[dict], bot_token: str) -> str:
+def merge_attachments_to_text(results: list[AttachmentResult]) -> str:
+    """AttachmentResult 목록을 병합 문자열로 변환한다 (caller가 str을 필요로 할 때 사용)."""
+    return "\n\n".join(r.analysis_text for r in results if r.analysis_text)
+
+
+def analyze_slack_files(files: list[dict], bot_token: str) -> list[AttachmentResult]:
     """
     Slack files 목록에서 이미지를 분석하고, 비이미지 파일(txt, xlsx, docx, pdf, mov 등)의
-    텍스트도 함께 추출하여 반환한다.
-    결과가 없으면 빈 문자열을 반환한다.
+    텍스트도 함께 추출하여 파일별 AttachmentResult 목록을 반환한다.
+    결과가 없으면 빈 리스트를 반환한다.
     """
     from services.llm_service import call_vision
     from utils.file_processor import extract_file_texts
 
-    # ── 이미지 다운로드 (원본 bytes 보관) ───────────────────────────────────
-    raw_images: list[bytes] = []
+    # ── 이미지 다운로드 (원본 bytes + 파일 메타데이터 보관) ──────────────────
+    image_items: list[tuple[bytes, dict]] = []  # (raw_bytes, file_dict)
     for f in files:
-        if len(raw_images) >= _MAX_IMAGES:
+        if len(image_items) >= _MAX_IMAGES:
             break
         mime = f.get("mimetype", "")
         if not any(mime.startswith(p) for p in _IMAGE_MIME_PREFIXES):
@@ -145,21 +152,27 @@ def analyze_slack_files(files: list[dict], bot_token: str) -> str:
             continue
         raw = _download_raw(url, bot_token)
         if raw:
-            raw_images.append(raw)
+            image_items.append((raw, f))
 
-    image_results: list[str] = []
-    if raw_images:
-        # 이미지를 1장씩 처리한다.
-        # Vision LLM 호출 시 세마포어로 QA 요청과 경쟁을 조율한다.
-        count = len(raw_images)
-        for i, raw in enumerate(raw_images, 1):
-            label = f"[이미지 {i}] " if count > 1 else ""
+    image_results: list[AttachmentResult] = []
+    if image_items:
+        count = len(image_items)
+        for i, (raw, f) in enumerate(image_items, 1):
+            file_id = f.get("id", "")
+            file_name = f.get("name", "")
+            mime_type = f.get("mimetype", "")
 
             # OCR 먼저 시도: 2048px 이하 원본 품질로 텍스트 추출
             ocr_text = _extract_text_by_ocr(raw)
             if len(ocr_text) >= _OCR_TEXT_THRESHOLD:
                 logger.info(f"이미지 {i}/{count}: OCR 완료 ({len(ocr_text)}자)")
-                image_results.append(f"{label}{ocr_text.strip()}")
+                image_results.append(AttachmentResult(
+                    slack_file_id=file_id,
+                    file_name=file_name,
+                    mime_type=mime_type,
+                    file_type="image",
+                    analysis_text=ocr_text.strip(),
+                ))
                 continue
 
             # OCR 텍스트 부족 → Vision LLM으로 화면 분석 (1280px 압축)
@@ -174,28 +187,35 @@ def analyze_slack_files(files: list[dict], bot_token: str) -> str:
             if part:
                 # OCR에서 부분 추출된 텍스트가 있으면 Vision LLM 결과에 보완
                 if ocr_text.strip():
-                    image_results.append(
-                        f"{label}{part.strip()}\n[화면 내 텍스트: {ocr_text.strip()}]"
-                    )
+                    analysis = f"{part.strip()}\n[화면 내 텍스트: {ocr_text.strip()}]"
                 else:
-                    image_results.append(f"{label}{part.strip()}")
+                    analysis = part.strip()
+                image_results.append(AttachmentResult(
+                    slack_file_id=file_id,
+                    file_name=file_name,
+                    mime_type=mime_type,
+                    file_type="image",
+                    analysis_text=analysis,
+                ))
             else:
                 logger.warning(f"이미지 {i}/{count}장 분석 실패")
 
         if image_results:
             logger.info(f"이미지 분석 완료: {len(image_results)}/{count}장")
-            logger.debug(f"이미지 분석 결과(앞 500자):\n{chr(10).join(image_results)[:500]}")
+            logger.debug(
+                f"이미지 분석 결과(앞 500자):\n"
+                f"{chr(10).join(r.analysis_text for r in image_results)[:500]}"
+            )
         else:
             logger.warning(f"이미지 분석 전체 실패: {count}장")
 
     # ── 비이미지 파일: 텍스트 추출 ─────────────────────────────────────────
-    file_text = extract_file_texts(files, bot_token)
-    if file_text:
-        logger.info(f"비이미지 파일 텍스트 추출 완료 ({len(file_text)}자)")
+    file_results = extract_file_texts(files, bot_token)
+    if file_results:
+        total_chars = sum(len(r.analysis_text) for r in file_results)
+        logger.info(f"비이미지 파일 텍스트 추출 완료 ({total_chars}자, {len(file_results)}건)")
 
-    # ── 결과 통합 ─────────────────────────────────────────────────────────
-    parts = [p for p in ["\n".join(image_results), file_text] if p]
-    return "\n\n".join(parts) if parts else ""
+    return image_results + file_results
 
 
 def _resize_if_needed(img: Image.Image, max_side: int) -> Image.Image:

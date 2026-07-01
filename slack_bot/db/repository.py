@@ -8,7 +8,8 @@ from sqlalchemy import func, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from db.models import BotSetting, ConversationMessage, ContextEmbedding, ContextSummary, MessageFeedback, ProductCategory
+from db.models import BotSetting, ConversationMessage, ContextEmbedding, ContextSummary, MessageAttachment, MessageFeedback, ProductCategory
+from utils.attachment_result import AttachmentResult
 import config
 
 logger = logging.getLogger(__name__)
@@ -1650,3 +1651,38 @@ def promote_topic_to_product(
         session.flush()
 
     return True
+
+
+# ---------------------------------------------------------------------------
+# MessageAttachment CRUD
+# ---------------------------------------------------------------------------
+
+def save_attachments(
+    session: Session,
+    message_id: int,
+    attachments: list[AttachmentResult],
+) -> None:
+    """메시지에 첨부된 파일 분석 결과를 message_attachment 테이블에 저장한다."""
+    for att in attachments:
+        session.add(MessageAttachment(
+            message_id=message_id,
+            slack_file_id=att.slack_file_id or None,
+            file_name=att.file_name or None,
+            mime_type=att.mime_type or None,
+            file_type=att.file_type,
+            analysis_text=att.analysis_text or None,
+        ))
+    session.flush()
+
+
+def get_attachments_for_message(
+    session: Session,
+    message_id: int,
+) -> list[MessageAttachment]:
+    """메시지 ID에 연결된 첨부파일 분석 결과 목록을 반환한다."""
+    return (
+        session.query(MessageAttachment)
+        .filter(MessageAttachment.message_id == message_id)
+        .order_by(MessageAttachment.id)
+        .all()
+    )

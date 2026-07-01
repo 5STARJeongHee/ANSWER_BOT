@@ -175,6 +175,11 @@ WEB_SEARCH_MAX_CHARS: int = int(os.getenv("WEB_SEARCH_MAX_CHARS", "300"))
 SEARCH_PROVIDER: str = os.getenv("SEARCH_PROVIDER", "searxng")
 SEARXNG_URL: str = os.getenv("SEARXNG_URL", "http://searxng:8080")
 
+# --- ReAct QA 설정 ---
+# true: LLM이 다단계 RAG/웹 검색을 직접 결정하는 ReAct 패턴 활성화 (LLM 호출 최대 3회)
+ENABLE_REACT_QA: bool = os.getenv("ENABLE_REACT_QA", "false").lower() == "true"
+REACT_MAX_ITERATIONS: int = int(os.getenv("REACT_MAX_ITERATIONS", "3"))
+
 # --- 배치 스케줄 설정 ---
 SUMMARY_BATCH_HOUR: int = int(os.getenv("SUMMARY_BATCH_HOUR", "2"))
 SUMMARY_BATCH_WEEKDAY: int = int(os.getenv("SUMMARY_BATCH_WEEKDAY", "0"))

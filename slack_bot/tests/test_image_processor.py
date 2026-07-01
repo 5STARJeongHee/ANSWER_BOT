@@ -23,7 +23,7 @@ _classifier_stub._classify_cache = {}
 sys.modules.setdefault("services.classifier", _classifier_stub)
 
 _file_proc_stub = MagicMock()
-_file_proc_stub.extract_file_texts = MagicMock(return_value="")
+_file_proc_stub.extract_file_texts = MagicMock(return_value=[])
 sys.modules.setdefault("utils.file_processor", _file_proc_stub)
 
 _config_stub = MagicMock()
@@ -186,7 +186,7 @@ class TestAnalyzeSlackFilesOcrRouting:
             result = analyze_slack_files([_image_file()], "tok")
 
         mock_cv.assert_not_called()
-        assert "Connection refused" in result
+        assert any("Connection refused" in r.analysis_text for r in result)
 
     def test_delegates_to_vision_when_ocr_text_insufficient(self):
         """OCR 텍스트가 임계값 미만이면 Vision LLM을 호출하고 그 결과를 반환한다."""
@@ -200,7 +200,7 @@ class TestAnalyzeSlackFilesOcrRouting:
             result = analyze_slack_files([_image_file()], "tok")
 
         mock_cv.assert_called_once()
-        assert "로그인 화면" in result
+        assert any("로그인 화면" in r.analysis_text for r in result)
 
     def test_partial_ocr_text_appended_to_vision_result(self):
         """OCR이 부분 텍스트를 찾았을 때(임계값 미만) Vision LLM 결과에 보완으로 포함한다."""
@@ -213,8 +213,8 @@ class TestAnalyzeSlackFilesOcrRouting:
              patch.object(_llm_stub, "call_vision", return_value="오류 다이얼로그 화면"):
             result = analyze_slack_files([_image_file()], "tok")
 
-        assert "오류 다이얼로그 화면" in result
-        assert "NullPointerException" in result
+        assert any("오류 다이얼로그 화면" in r.analysis_text for r in result)
+        assert any("NullPointerException" in r.analysis_text for r in result)
 
     def test_vision_compress_uses_vlm_resolution(self):
         """Vision LLM 경로에서 _MAX_SIDE_VLM_PX 해상도로 압축한다."""
@@ -248,7 +248,7 @@ class TestAnalyzeSlackFilesOcrRouting:
             result = analyze_slack_files([_image_file(), _image_file()], "tok")
 
         mock_cv.assert_called_once()
-        assert "Vision 결과" in result
+        assert any("Vision 결과" in r.analysis_text for r in result)
 
     def test_download_failure_skips_image(self):
         """이미지 다운로드 실패 시 해당 이미지를 건너뛴다."""
@@ -258,7 +258,7 @@ class TestAnalyzeSlackFilesOcrRouting:
             result = analyze_slack_files([_image_file()], "tok")
 
         mock_cv.assert_not_called()
-        assert result == ""
+        assert result == []
 
     def test_compress_failure_skips_vision(self):
         """VLM 압축 실패 시 해당 이미지를 건너뛴다."""
@@ -270,4 +270,4 @@ class TestAnalyzeSlackFilesOcrRouting:
             result = analyze_slack_files([_image_file()], "tok")
 
         mock_cv.assert_not_called()
-        assert result == ""
+        assert result == []

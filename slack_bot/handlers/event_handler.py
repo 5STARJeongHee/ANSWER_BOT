@@ -28,6 +28,7 @@ from db.repository import (
     get_all_product_categories,
     increment_product_question_count,
     get_unowned_products_above_threshold,
+    save_attachments,
     mark_product_notified,
     get_notification_admins,
     add_notification_admin,
@@ -58,7 +59,7 @@ from ui.message_blocks import (
     build_topic_candidates_blocks,
 )
 from services.summarizer import summarize_thread_context
-from utils.image_processor import analyze_slack_files
+from utils.image_processor import analyze_slack_files, merge_attachments_to_text
 from utils.pii_filter import apply_pii_filter, has_pii
 from utils.token_counter import trim_messages_to_budget
 
@@ -886,9 +887,10 @@ def _has_user_mention(text: str) -> bool:
     return bool(_SLACK_USER_MENTION_RE.search(text))
 
 
-def _build_image_context(event: dict, bot_token: str) -> str:
-    """이벤트의 이미지를 분석하여 텍스트를 반환한다 (analyze_slack_files 위임)."""
-    return analyze_slack_files(event.get("files") or [], bot_token)
+def _build_image_context(event: dict, bot_token: str) -> tuple[str, list]:
+    """이벤트의 첨부파일을 분석하여 (병합 텍스트, AttachmentResult 목록) 튜플을 반환한다."""
+    results = analyze_slack_files(event.get("files") or [], bot_token)
+    return merge_attachments_to_text(results), results
 
 
 _FALLBACK_TRIGGER_KEYWORDS = (
@@ -1114,39 +1116,60 @@ def _process_question(
             if contexts else None
         )
         web_search_block = ""
+        _prompt_tokens = None
 
-        if highest_similarity >= 0.90:
-            logger.info(f"RAG 충분({highest_similarity:.2f}), 웹 검색 생략")
+        if config.ENABLE_REACT_QA:
+            # ReAct 패턴: LLM이 다단계 검색을 스스로 결정
+            from services.react_qa import react_qa
+            react_result = react_qa(
+                session=session,
+                question=question,
+                channel_id=effective_rag_channel,
+                thread_summary=thread_summary,
+                image_context=image_context,
+                topic=topic,
+                max_iterations=config.REACT_MAX_ITERATIONS,
+            )
+            answer = react_result.answer
+            if react_result.rag_contexts:
+                contexts = react_result.rag_contexts
+                _rag_avg_sim = (
+                    sum(c.get("similarity", 0.0) for c in contexts) / len(contexts)
+                )
+            web_search_block = "web" if react_result.used_web_search else ""
         else:
-            web_search_text = search_web(question)
-            web_search_block = format_web_search_for_prompt(web_search_text)
+            if highest_similarity >= 0.90:
+                logger.info(f"RAG 충분({highest_similarity:.2f}), 웹 검색 생략")
+            else:
+                web_search_text = search_web(question)
+                web_search_block = format_web_search_for_prompt(web_search_text)
 
-        # 4. QA 프롬프트 구성 (웹 검색 결과는 RAG 컨텍스트 뒤에 배치)
-        system_prompt = _QA_SYSTEM_PROMPT_WITH_WEB if web_search_block else _QA_SYSTEM_PROMPT
-        user_message_content = (
-            f"[참고 컨텍스트 - 과거 관련 대화]\n{context_text}\n\n"
-            + (f"[스레드 이전 문맥 요약]\n{thread_summary}\n\n" if thread_summary else "")
-            + (f"{web_search_block}\n\n" if web_search_block else "")
-            + f"[최근 대화 이력]\n{recent_text or '(없음)'}\n\n"
-            f"[현재 질문]\n작성자: {user_name}\n내용: {question}"
-        )
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_message_content},
-        ]
+            # 4. QA 프롬프트 구성 (웹 검색 결과는 RAG 컨텍스트 뒤에 배치)
+            system_prompt = _QA_SYSTEM_PROMPT_WITH_WEB if web_search_block else _QA_SYSTEM_PROMPT
+            user_message_content = (
+                f"[참고 컨텍스트 - 과거 관련 대화]\n{context_text}\n\n"
+                + (f"[스레드 이전 문맥 요약]\n{thread_summary}\n\n" if thread_summary else "")
+                + (f"{web_search_block}\n\n" if web_search_block else "")
+                + f"[최근 대화 이력]\n{recent_text or '(없음)'}\n\n"
+                f"[현재 질문]\n작성자: {user_name}\n내용: {question}"
+            )
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message_content},
+            ]
 
-        # 5. 토큰 예산 내로 메시지 정리
-        messages_trimmed = trim_messages_to_budget(
-            messages=messages,
-            system_prompt=system_prompt,
-            max_tokens=config.MAX_CONTEXT_TOKENS,
-        )
-        # 입력 토큰 추정 (LLM에 전달하기 직전)
-        from utils.token_counter import estimate_message_tokens
-        _prompt_tokens = estimate_message_tokens(messages_trimmed)
+            # 5. 토큰 예산 내로 메시지 정리
+            messages_trimmed = trim_messages_to_budget(
+                messages=messages,
+                system_prompt=system_prompt,
+                max_tokens=config.MAX_CONTEXT_TOKENS,
+            )
+            # 입력 토큰 추정 (LLM에 전달하기 직전)
+            from utils.token_counter import estimate_message_tokens
+            _prompt_tokens = estimate_message_tokens(messages_trimmed)
 
-        # 6. 답변 생성
-        answer = call_qa(messages_trimmed)
+            # 6. 답변 생성
+            answer = call_qa(messages_trimmed)
         if not answer:
             logger.error("QA 모델에서 답변 생성 실패")
             _send_error_or_fallback(
@@ -1533,12 +1556,12 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
             from utils.token_counter import estimate_tokens
             user_name = get_user_display_name(client, user_id) if user_id else "익명"
 
-            # 첨부 이미지가 있으면 압축 후 vision 모델로 분석 (최대 _MAX_IMAGES개)
+            # 첨부 이미지/파일이 있으면 분석 후 텍스트 합산
             effective_question = question
-            image_context = _build_image_context(event, config.SLACK_BOT_TOKEN)
-            if image_context:
+            image_merged, image_attachments = _build_image_context(event, config.SLACK_BOT_TOKEN)
+            if image_merged:
                 effective_question = (
-                    f"[첨부 이미지 분석]\n{image_context}\n\n{question}".strip()
+                    f"[첨부 이미지 분석]\n{image_merged}\n\n{question}".strip()
                 )
 
             # 제품 힌트 조회 + 주제/제품 LLM 분류 (단일 호출)
@@ -1549,7 +1572,7 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
                 _prod_session.close()
             _topic, _product_key = extract_topic_and_product(effective_question, _products)
 
-            _save_message_and_embed(
+            msg_id = _save_message_and_embed(
                 session_factory=session_factory,
                 event_id=event_id,
                 channel_id=channel_id,
@@ -1563,6 +1586,14 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
                 topic=_topic,
                 product_key=_product_key,
             )
+
+            if msg_id is not None and image_attachments:
+                _att_session = session_factory()
+                try:
+                    save_attachments(_att_session, msg_id, image_attachments)
+                    _att_session.commit()
+                finally:
+                    _att_session.close()
 
             # 제품 질문 카운트 증가 + 담당자 미지정 시 관리자 알림
             if _product_key:
@@ -1597,7 +1628,7 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
                 session_factory=session_factory,
                 thinking_ts=thinking_ts,
                 thread_summary=thread_summary,
-                image_context=image_context or None,
+                image_context=image_merged or None,
                 show_thread_tip=is_new_thread,
                 product_key=_product_key,
                 topic=_topic,
@@ -1654,7 +1685,8 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
         logger.debug(f"메시지 수신: channel={channel_id} type={channel_type} user={user_id} text={raw_text[:50]!r}")
 
         def worker():
-            image_ctx = analyze_slack_files(event.get("files") or [], config.SLACK_BOT_TOKEN)
+            _attach_results = analyze_slack_files(event.get("files") or [], config.SLACK_BOT_TOKEN)
+            image_ctx = merge_attachments_to_text(_attach_results)
             if image_ctx:
                 effective_content = (
                     f"[첨부 이미지 분석]\n{image_ctx}\n\n{raw_text}".strip()
@@ -1675,7 +1707,7 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
                     _dm_prod_session.close()
                 _dm_topic, _dm_product_key = extract_topic_and_product(effective_content, _dm_products)
 
-                _save_message_and_embed(
+                _dm_msg_id = _save_message_and_embed(
                     session_factory=session_factory,
                     event_id=event_id,
                     channel_id=channel_id,
@@ -1688,6 +1720,14 @@ def register_handlers(app: App, session_factory, bot_user_id: Optional[str] = No
                     topic=_dm_topic,
                     product_key=_dm_product_key,
                 )
+
+                if _dm_msg_id is not None and _attach_results:
+                    _dm_att_session = session_factory()
+                    try:
+                        save_attachments(_dm_att_session, _dm_msg_id, _attach_results)
+                        _dm_att_session.commit()
+                    finally:
+                        _dm_att_session.close()
 
                 user_name = get_user_display_name(client, user_id) if user_id else "익명"
                 thinking_ts = post_thinking_indicator(

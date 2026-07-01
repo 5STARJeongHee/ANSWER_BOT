@@ -7,6 +7,8 @@ from typing import Optional
 
 import requests
 
+from utils.attachment_result import AttachmentResult
+
 logger = logging.getLogger(__name__)
 
 _DOWNLOAD_TIMEOUT_SEC = 30
@@ -169,7 +171,7 @@ def _extract_video(data: bytes, filename: str) -> str:
         return f"[동영상 첨부: {filename}]"
 
 
-def extract_file_texts(files: list[dict], bot_token: str) -> str:
+def extract_file_texts(files: list[dict], bot_token: str) -> list[AttachmentResult]:
     """
     Slack files 목록에서 이미지를 제외한 파일의 텍스트를 추출하여 반환한다.
 
@@ -181,13 +183,14 @@ def extract_file_texts(files: list[dict], bot_token: str) -> str:
       - 동영상: mov, mp4 등 (openai-whisper 선택 설치 시 전사, 미설치 시 파일명만 기록)
       - 미지원: 파일명만 기록
 
-    반환: 추출된 텍스트를 "\n\n"으로 구분한 문자열. 없으면 빈 문자열.
+    반환: AttachmentResult 목록. 없으면 빈 리스트.
     """
-    results: list[str] = []
+    results: list[AttachmentResult] = []
 
     for f in files:
         mime = f.get("mimetype", "")
         filename = f.get("name", "첨부파일")
+        file_id = f.get("id", "")
         url = f.get("url_private_download") or f.get("url_private")
         ext = _get_extension(filename)
 
@@ -198,37 +201,42 @@ def extract_file_texts(files: list[dict], bot_token: str) -> str:
         if mime.startswith("image/"):
             continue
 
-        label = f"[파일: {filename}]"
         extracted = ""
+        file_type = "other"
 
         # ---- MIME 우선 분류, 실패 시 확장자 fallback ----
 
         # 텍스트 계열
         if any(mime.startswith(p) for p in _TEXT_MIME_PREFIXES) or ext in _TEXT_EXTENSIONS:
+            file_type = "text"
             data = _download_bytes(url, bot_token)
             if data:
                 extracted = _extract_text_plain(data)
 
         # xlsx
         elif mime in _XLSX_MIMES or ext in _XLSX_EXTENSIONS:
+            file_type = "xlsx"
             data = _download_bytes(url, bot_token)
             if data:
                 extracted = _extract_xlsx(data)
 
         # docx / doc
         elif mime in _DOCX_MIMES or ext in _DOCX_EXTENSIONS:
+            file_type = "docx"
             data = _download_bytes(url, bot_token)
             if data:
                 extracted = _extract_docx(data)
 
         # pdf
         elif mime in _PDF_MIMES or ext in _PDF_EXTENSIONS:
+            file_type = "pdf"
             data = _download_bytes(url, bot_token)
             if data:
                 extracted = _extract_pdf(data)
 
         # 동영상
         elif mime in _VIDEO_MIMES or ext in _VIDEO_EXTENSIONS:
+            file_type = "video"
             data = _download_bytes(url, bot_token)
             if data:
                 extracted = _extract_video(data, filename)
@@ -236,10 +244,24 @@ def extract_file_texts(files: list[dict], bot_token: str) -> str:
         # 미지원 형식 — 파일명만 기록
         else:
             logger.debug(f"미지원 파일 형식 — 이름만 기록: mime={mime!r} name={filename!r}")
-            results.append(label)
+            results.append(AttachmentResult(
+                slack_file_id=file_id,
+                file_name=filename,
+                mime_type=mime,
+                file_type="other",
+                analysis_text=f"[파일: {filename}]",
+            ))
             continue
 
         extracted = extracted[:_MAX_TEXT_CHARS].strip()
-        results.append(f"{label}\n{extracted}" if extracted else label)
+        label = f"[파일: {filename}]"
+        analysis = f"{label}\n{extracted}" if extracted else label
+        results.append(AttachmentResult(
+            slack_file_id=file_id,
+            file_name=filename,
+            mime_type=mime,
+            file_type=file_type,
+            analysis_text=analysis,
+        ))
 
-    return "\n\n".join(results) if results else ""
+    return results
